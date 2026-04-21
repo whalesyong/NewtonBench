@@ -30,6 +30,7 @@ keys = {
     'or': os.getenv("OPENROUTER_API_KEY"),
     'oa': os.getenv("OPENAI_API_KEY"),
     'vl': os.getenv("VLLM_API_KEY"),
+    'vj': os.getenv("VLLM_API_KEY"),  # judge vLLM uses same auth key
 }
 
 # development: economic use for development stage / final evaluation
@@ -56,7 +57,10 @@ api_source_mapping = {
     "nemotron-ultra": {"or": "nvidia/llama-3.1-nemotron-ultra-253b-v1"}, #development-LRM
 
     # Local vLLM server (OpenAI-compatible)
-    "vllm-local": {"vl": os.getenv("MODEL_STR", "openai/Qwen/Qwen3.5-9B")},
+    "vllm-local": {"vl": os.getenv("MODEL_STR", "Qwen/Qwen3.5-9B")},
+
+    # Local vLLM judge server (can be a separate instance)
+    "vllm-judge-local": {"vj": os.getenv("JUDGE_STR", "Qwen/Qwen3.5-9B")},
 }
 
 def resolve_model_and_source(model_name, keys):
@@ -73,6 +77,10 @@ def resolve_model_and_source(model_name, keys):
     # Prefer OA if key exists AND model supports OA mapping (non-None)
     if keys.get('oa') and provider_map.get('oa'):
         return 'oa', provider_map['oa']
+
+    # Check vLLM judge if key exists and mapping available
+    if keys.get('vj') and provider_map.get('vj'):
+        return 'vj', provider_map['vj']
 
     # Check vLLM if key exists and mapping available
     if keys.get('vl') and provider_map.get('vl'):
@@ -307,7 +315,28 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
         except Exception as e:
             print(f"[Trial {trial_id}] vLLM API error: {e}")
             raise e
-    
+
+    elif api_source == "vj":
+        try:
+            judge_port = os.getenv("JUDGE_PORT", "8000")
+            client = OpenAI(api_key=keys['vj'], base_url=f"http://localhost:{judge_port}/v1")
+            completion = client.chat.completions.create(
+                model=full_model_name,
+                messages=messages,
+                temperature=temperature
+            )
+            content = completion.choices[0].message.content
+            reasoning_content = getattr(completion.choices[0].message, 'reasoning_content', None)
+            if reasoning_content is None:
+                reasoning_content = getattr(completion.choices[0].message, 'reasoning', None)
+            if content is None:
+                tokens = 0
+            else:
+                tokens = getattr(completion.usage, 'completion_tokens', len(content.split()))
+        except Exception as e:
+            print(f"[Trial {trial_id}] vLLM Judge API error: {e}")
+            raise e
+
     else:
         raise ValueError(f"Unknown API source: {api_source}")
     
@@ -400,10 +429,6 @@ if __name__ == '__main__':
             # The call_llm_api function will automatically resolve the best API source
             # and raise an error if no valid API key is available for the model.
 
-            # wy edit: if model_name is vllm-local and no JUDGE_STR is specified, throw exception. 
-            if model_name == "vllm-local":
-                if ['JUDGE_STR', 'JUDGE_PORT'] not in os.environ: 
-                    raise Exception('Bash variable "JUDGE_STR" not set. Please set to vllm model judge name. ')
             content, reasoning_content, tokens = call_llm_api(sample_messages, model_name)
             print(f"✅ SUCCESS")
             print(f"Response: {content}")

@@ -208,7 +208,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     noise_str = str(cli_args.noise).replace('.', '_')
     law_version_str = law_version if law_version is not None else "random"
     curr_time = datetime.now()
-    formatted = now.strftime("%Y%m%d_%H%M")
+    formatted = curr_time.strftime("%Y%m%d_%H%M")
     base_dir = os.path.join("evaluation_results", cli_args.model_name, formatted, cli_args.module, cli_args.agent_backend, cli_args.equation_difficulty, law_version_str)
     
     version_num = 1
@@ -225,7 +225,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     start_time = time.time()
     
     max_retries = 3
-    judge_model_name = "gpt41"
+    judge_model_name = "vllm-judge-local"
     
     pool_args = [
         (i, cli_args.noise, cli_args.model_name, cli_args.module, cli_args.equation_difficulty, cli_args.model_system, law_version, trials_dir, max_retries, judge_model_name, cli_args.agent_backend)

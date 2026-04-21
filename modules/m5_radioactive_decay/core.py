@@ -176,6 +176,7 @@ def evaluate_law(
     law_version: str = None,
     judge_model_name: str = "nemotron-ultra",
     trial_info=None,
+    test_seed: int = None,
 ) -> dict:
     """
     Evaluator assessing the symbolic equivalence and RMSLE of the LLM's submitted function.
@@ -201,6 +202,8 @@ def evaluate_law(
     # --- Extract ground truth law and test data ---
     gt_law, selected_law_version = get_ground_truth_law(difficulty, law_version)
     
+    if test_seed is not None:
+        np.random.seed(test_seed)
     # Generate test data
     num_points = 5000
     # Use log-uniform sampling for all parameters

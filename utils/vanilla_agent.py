@@ -79,9 +79,9 @@ def _extract_final_law(response_text: str, function_signature: str):
     else:
         return False, f"{function_signature} return float('nan')"
 
-def _call_llm_and_process_response(messages: List[Dict[str, str]], model_name: str, trial_info: Dict[str, Any]) -> Tuple[List[Dict[str, str]], int, str]:
+def _call_llm_and_process_response(messages: List[Dict[str, str]], model_name: str, trial_info: Dict[str, Any], temperature: float = 0.4) -> Tuple[List[Dict[str, str]], int, str]:
     """Calls the LLM API, processes the response, and updates the message history."""
-    response_text, reasoning_response, tokens = call_llm_api(messages, model_name=model_name, trial_info=trial_info)
+    response_text, reasoning_response, tokens = call_llm_api(messages, model_name=model_name, temperature=temperature, trial_info=trial_info)
     
     if response_text is None:
         response_text = ""
@@ -95,7 +95,92 @@ def _call_llm_and_process_response(messages: List[Dict[str, str]], model_name: s
     messages.append({"role": "assistant", "content": combined_content})
     return messages, tokens, response_text
 
-def conduct_exploration(module: Any, model_name: str, noise_level: float, difficulty: str = 'easy', system: str = 'vanilla_equation', law_version: str = None, max_turns: int = 10, trial_info: Dict[str, Any] = None) -> Dict[str, Any]:
+def _run_from_messages(
+    module: Any,
+    model_name: str,
+    messages: List[Dict[str, str]],
+    noise_level: float,
+    difficulty: str,
+    system: str,
+    law_version: str,
+    max_turns: int,
+    start_turn: int,
+    trial_info: Dict[str, Any],
+    temperature: float = 0.4,
+    num_experiments_run: int = 0,
+    total_tokens: int = 0,
+) -> Dict[str, Any]:
+    """Continues the exploration loop from a pre-populated messages list.
+
+    The caller owns `messages` (system + user + any prior assistant/user exchanges).
+    `start_turn` is the 0-indexed loop iteration to resume at; it is only used for the
+    `rounds` accounting in the return value. The loop itself runs up to
+    (max_turns - start_turn) more iterations before forcing a final-law submission.
+    """
+    for turn in range(start_turn, max_turns):
+        messages, tokens, response_text = _call_llm_and_process_response(
+            messages, model_name, trial_info, temperature=temperature
+        )
+        total_tokens += tokens
+
+        # Check for final law submission
+        is_submitted, submitted_law = _extract_final_law(response_text, module.FUNCTION_SIGNATURE)
+        if is_submitted:
+            return {
+                "status": "completed",
+                "submitted_law": submitted_law,
+                "rounds": turn + 1,
+                "max_turns": max_turns,
+                "total_tokens": total_tokens,
+                "num_experiments": num_experiments_run,
+                "chat_history": messages
+            }
+
+        # Check for experiment request
+        experiments_to_run = parse_experiment_request(response_text if response_text is not None else "")
+
+        if experiments_to_run:
+            num_experiments_run += len(experiments_to_run)
+            results = []
+            for exp in experiments_to_run:
+                # Pass system and law_version to run_experiment_for_module
+                result = module.run_experiment_for_module(**exp, noise_level=noise_level, difficulty=difficulty, system=system, law_version=law_version)
+                if system == "vanilla_equation":
+                    result = "{:.15e}".format(result)
+                results.append(result)
+
+            # Format results for the LLM as JSON
+            output_str = f"<experiment_output>\n{json.dumps(results)}\n</experiment_output>"
+            messages.append({"role": "user", "content": output_str})
+        else:
+            # If no valid action, prompt the LLM to act
+            messages.append({"role": "user", "content": "Invalid response. Please use <run_experiment> tag with the correct JSON format or <final_law> tag to submit the law."})
+
+    # If max turns are reached, force submission
+    final_prompt = "You have used all your experiment turns. Please submit your final law now using the <final_law> tag."
+    if messages and messages[-1]["role"] == "user":
+        messages[-1]["content"] += "\n\n" + final_prompt
+    else:
+        messages.append({"role": "user", "content": final_prompt})
+
+    messages, tokens, response_text = _call_llm_and_process_response(
+        messages, model_name, trial_info, temperature=temperature
+    )
+    total_tokens += tokens
+
+    _, submitted_law = _extract_final_law(response_text, module.FUNCTION_SIGNATURE)
+    return {
+        "status": "max_turns_reached",
+        "submitted_law": submitted_law,
+        "rounds": max_turns,
+        "max_turns": max_turns,
+        "total_tokens": total_tokens,
+        "num_experiments": num_experiments_run,
+        "chat_history": messages
+    }
+
+
+def conduct_exploration(module: Any, model_name: str, noise_level: float, difficulty: str = 'easy', system: str = 'vanilla_equation', law_version: str = None, max_turns: int = 10, trial_info: Dict[str, Any] = None, temperature: float = 0.4) -> Dict[str, Any]:
     """
     Manages the iterative exploration process with the LLM.
 
@@ -107,6 +192,7 @@ def conduct_exploration(module: Any, model_name: str, noise_level: float, diffic
         system: The experiment system ('vanilla_equation', 'simple_system', 'complex_system').
         max_turns: The maximum number of interaction rounds.
         trial_info: Optional trial information dictionary.
+        temperature: Sampling temperature passed to the LLM API.
 
     Returns:
         A dictionary containing the results of the exploration.
@@ -116,61 +202,17 @@ def conduct_exploration(module: Any, model_name: str, noise_level: float, diffic
         base_prompt = "detailed thinking on \n" + base_prompt
     messages = [{"role": "system", "content": base_prompt}]
     messages.append({"role": "user", "content": module.get_task_prompt(system, noise_level=noise_level)})
-    
-    total_tokens = 0
-    num_experiments_run = 0
 
-    for turn in range(max_turns):
-        messages, tokens, response_text = _call_llm_and_process_response(messages, model_name, trial_info)
-        total_tokens += tokens
-
-        # Check for final law submission
-        is_submitted, submitted_law = _extract_final_law(response_text, module.FUNCTION_SIGNATURE)
-        if is_submitted:
-            return {
-                "status": "completed",
-                "submitted_law": submitted_law,
-                "rounds": turn + 1,
-                "total_tokens": total_tokens,
-                "num_experiments": num_experiments_run,
-                "chat_history": messages
-            }
-
-        # Check for experiment request
-        experiments_to_run = parse_experiment_request(response_text if response_text is not None else "")
-        
-        if experiments_to_run:
-            num_experiments_run += len(experiments_to_run)
-            results = []
-            for exp in experiments_to_run:
-                # Pass system and law_version to run_experiment_for_module
-                result = module.run_experiment_for_module(**exp, noise_level=noise_level, difficulty=difficulty, system=system, law_version=law_version)
-                if system == "vanilla_equation":
-                    result = "{:.15e}".format(result)            
-                results.append(result)
-
-            # Format results for the LLM as JSON
-            output_str = f"<experiment_output>\n{json.dumps(results)}\n</experiment_output>"
-            messages.append({"role": "user", "content": output_str})
-        else:
-            # If no valid action, prompt the LLM to act
-            messages.append({"role": "user", "content": "Invalid response. Please use <run_experiment> tag with the correct JSON format or <final_law> tag to submit the law."})
-    # If max turns are reached, force submission
-    final_prompt = "You have used all your experiment turns. Please submit your final law now using the <final_law> tag."
-    if messages and messages[-1]["role"] == "user":
-        messages[-1]["content"] += "\n\n" + final_prompt
-    else:
-        messages.append({"role": "user", "content": final_prompt})
-    
-    messages, tokens, response_text = _call_llm_and_process_response(messages, model_name, trial_info)
-    total_tokens += tokens
-
-    _, submitted_law = _extract_final_law(response_text, module.FUNCTION_SIGNATURE)
-    return {
-        "status": "max_turns_reached",
-        "submitted_law": submitted_law,
-        "rounds": max_turns,
-        "total_tokens": total_tokens,
-        "num_experiments": num_experiments_run,
-        "chat_history": messages
-    }
+    return _run_from_messages(
+        module=module,
+        model_name=model_name,
+        messages=messages,
+        noise_level=noise_level,
+        difficulty=difficulty,
+        system=system,
+        law_version=law_version,
+        max_turns=max_turns,
+        start_turn=0,
+        trial_info=trial_info,
+        temperature=temperature,
+    )

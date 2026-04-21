@@ -268,6 +268,7 @@ def conduct_code_assisted_exploration(
         "submitted_law": submitted_law,
         "chat_history": chat_history,
         "rounds": turn + 1,
+        "max_turns": max_turns,
         "total_tokens": total_tokens,
         "python_tags_used_total": python_tags_used_total,
         "num_experiments": num_experiments,
