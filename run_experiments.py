@@ -207,8 +207,9 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     # Create unique results directory with hierarchical structure
     noise_str = str(cli_args.noise).replace('.', '_')
     law_version_str = law_version if law_version is not None else "random"
-       
-    base_dir = os.path.join("evaluation_results", cli_args.model_name, cli_args.module, cli_args.agent_backend, cli_args.equation_difficulty, law_version_str)
+    curr_time = datetime.now()
+    formatted = now.strftime("%Y%m%d_%H%M")
+    base_dir = os.path.join("evaluation_results", cli_args.model_name, formatted, cli_args.module, cli_args.agent_backend, cli_args.equation_difficulty, law_version_str)
     
     version_num = 1
     while True:

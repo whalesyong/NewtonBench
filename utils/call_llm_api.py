@@ -399,6 +399,11 @@ if __name__ == '__main__':
             print(f"--- Testing model: {model_name} (Source: {api_source.upper()}) ---")
             # The call_llm_api function will automatically resolve the best API source
             # and raise an error if no valid API key is available for the model.
+
+            # wy edit: if model_name is vllm-local and no JUDGE_STR is specified, throw exception. 
+            if model_name == "vllm-local":
+                if ['JUDGE_STR', 'JUDGE_PORT'] not in os.environ: 
+                    raise Exception('Bash variable "JUDGE_STR" not set. Please set to vllm model judge name. ')
             content, reasoning_content, tokens = call_llm_api(sample_messages, model_name)
             print(f"✅ SUCCESS")
             print(f"Response: {content}")
