@@ -21,19 +21,19 @@ def main():
     """Runs the quick start experiments."""
     print("--- Starting Quick Start ---")
 
-    # Command 1: Run vanilla agent with gpt41mini, equation difficulty as easy and model system as vanilla equation
+    # Command 1: Run vanilla agent with vllm-local, equation difficulty as easy and model system as vanilla equation
     command1 = [
         "python", "run_experiments.py",
-        "--model_name", "gpt41mini",
-        "-b", "vanilla_agent", 
+        "--model_name", "vllm-local",
+        "-b", "vanilla_agent",
         "-t", "1"
     ]
-    
-    # Command 2: Run code-assisted agent with gpt41mini, equation difficulty as easy and model system as vanilla equation
+
+    # Command 2: Run code-assisted agent with vllm-local, equation difficulty as easy and model system as vanilla equation
     command2 = [
-        "python", "run_experiments.py", 
-        "--model_name", "gpt41mini",
-        "-b", "code_assisted_agent", 
+        "python", "run_experiments.py",
+        "--model_name", "vllm-local",
+        "-b", "code_assisted_agent",
         "-t", "1"
     ]
 

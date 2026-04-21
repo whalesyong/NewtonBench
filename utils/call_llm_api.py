@@ -6,9 +6,14 @@ import re
 from openai import OpenAI
 
 from dotenv import load_dotenv
+from pathlib import Path
 
 # Load environment variables from a .env file if it exists
 load_dotenv()
+# Also load vLLM defaults from configs/vllm.env (repo root relative to this file)
+_vllm_env = Path(__file__).resolve().parent.parent / "configs" / "vllm.env"
+if _vllm_env.exists():
+    load_dotenv(_vllm_env)
 
 # Try to import fix-busted-json, fallback to custom implementation if not available
 try:
@@ -24,6 +29,7 @@ except ImportError:
 keys = {
     'or': os.getenv("OPENROUTER_API_KEY"),
     'oa': os.getenv("OPENAI_API_KEY"),
+    'vl': os.getenv("VLLM_API_KEY"),
 }
 
 # development: economic use for development stage / final evaluation
@@ -48,6 +54,9 @@ api_source_mapping = {
     "dsr1": {"or": "deepseek/deepseek-r1-0528"}, #formal-LRM
 
     "nemotron-ultra": {"or": "nvidia/llama-3.1-nemotron-ultra-253b-v1"}, #development-LRM
+
+    # Local vLLM server (OpenAI-compatible)
+    "vllm-local": {"vl": os.getenv("MODEL_STR", "openai/Qwen/Qwen3.5-9B")},
 }
 
 def resolve_model_and_source(model_name, keys):
@@ -64,6 +73,10 @@ def resolve_model_and_source(model_name, keys):
     # Prefer OA if key exists AND model supports OA mapping (non-None)
     if keys.get('oa') and provider_map.get('oa'):
         return 'oa', provider_map['oa']
+
+    # Check vLLM if key exists and mapping available
+    if keys.get('vl') and provider_map.get('vl'):
+        return 'vl', provider_map['vl']
 
     # Otherwise use OpenRouter if key exists and mapping available
     if keys.get('or') and provider_map.get('or'):
@@ -272,6 +285,27 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
                 tokens = getattr(completion.usage, 'completion_tokens', len(content.split()))
         except Exception as e:
             print(f"[Trial {trial_id}] OA API error: {e}")
+            raise e
+    
+    elif api_source == "vl":
+        try:
+            vllm_port = os.getenv("VLLM_PORT", "8000")
+            client = OpenAI(api_key=keys['vl'], base_url=f"http://localhost:{vllm_port}/v1")
+            completion = client.chat.completions.create(
+                model=full_model_name,
+                messages=messages,
+                temperature=temperature
+            )
+            content = completion.choices[0].message.content
+            reasoning_content = getattr(completion.choices[0].message, 'reasoning_content', None)
+            if reasoning_content is None:
+                reasoning_content = getattr(completion.choices[0].message, 'reasoning', None)
+            if content is None:
+                tokens = 0
+            else:
+                tokens = getattr(completion.usage, 'completion_tokens', len(content.split()))
+        except Exception as e:
+            print(f"[Trial {trial_id}] vLLM API error: {e}")
             raise e
     
     else:
