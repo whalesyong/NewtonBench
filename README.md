@@ -1,3 +1,6 @@
+
+Forked by: Wei Yong
+
 # NewtonBench: Benchmarking Generalizable Scientific Law Discovery in LLM Agents
 [![GitHub stars](https://img.shields.io/github/stars/HKUST-KnowComp/NewtonBench?style=for-the-badge&logo=github&logoColor=white&color=a29bfe&label=stars)](https://github.com/HKUST-KnowComp/NewtonBench)
 [![arXiv](https://img.shields.io/badge/arXiv-2510.07172-74b9ff?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2510.07172)
