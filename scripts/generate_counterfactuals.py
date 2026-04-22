@@ -367,8 +367,8 @@ def main() -> int:
                         help="Temperature for counterfactual action sampling (default: 1.0).")
     parser.add_argument("--max-turns", type=int, default=10,
                         help="Max LLM turns for the counterfactual rollout (default: 10).")
-    parser.add_argument("--judge-model-name", type=str, default="nemotron-ultra",
-                        help="LLM judge model for symbolic equivalence (default: nemotron-ultra).")
+    parser.add_argument("--judge-model-name", type=str, default="vllm-judge-local",
+                        help="LLM judge model for symbolic equivalence (default: vllm-judge-local).")
     parser.add_argument("--seed", type=int, default=0,
                         help="Top-level RNG seed for trajectory sampling and branch-point choice.")
     parser.add_argument("--workers", type=int, default=1,
