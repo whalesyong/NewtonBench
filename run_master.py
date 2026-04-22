@@ -125,9 +125,10 @@ def spawn_mac_terminal_batches(repo_root: Path, batches: List[List[Sequence[str]
     for batch in batches:
         if not batch:
             continue
-        # Build a single shell line: cd repo; cmd1 && cmd2 && ...; echo Done
+        # Build a single shell line: cd repo; source .env; cmd1 && cmd2 && ...; echo Done
         parts: List[str] = [f"cd {sh_quote(str(repo_root))}"]
         parts.append("conda activate newtonbench")
+        parts.append(f"source {sh_quote(str(repo_root / '.env'))}")
         for cmd in batch:
             parts.append(" ".join(sh_quote(p) for p in cmd))
         parts.append("echo 'Batch completed';")
