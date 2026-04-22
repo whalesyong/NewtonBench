@@ -7,6 +7,7 @@ import glob
 import time
 from typing import Tuple, List, Dict, Optional
 from collections import defaultdict
+from utils.exp_dir import get_next_exp_id, find_exp_dirs
 
 def get_module_folders():
     """Scan the 'modules' directory for all module folders (e.g., m0_gravity)."""
@@ -32,20 +33,24 @@ def get_law_versions_for_difficulty(module_name, difficulty):
         return []
 
 def get_experiment_path(model_name: str, module: str, agent_backend: str, difficulty: str, 
-                       law_version: str, system: str, noise_level: float) -> str:
-    """Generate standardized experiment directory path."""
+                        law_version: str, system: str, noise_level: float) -> str:
+    """Generate standardized experiment directory path under the latest exp_<N> directory."""
     noise_str = str(noise_level).replace('.', '_')
     law_version_str = law_version if law_version is not None else "random"
-         
-    # Standard behavior: Find the latest version number for this configuration
+    
+    exp_dirs = find_exp_dirs(model_name)
+    if exp_dirs:
+        latest_exp_dir = exp_dirs[-1][1]
+    else:
+        latest_exp_dir = os.path.join("evaluation_results", model_name, "exp_1")
+
     base_pattern = os.path.join(
-        "evaluation_results", model_name, module, agent_backend, difficulty, law_version_str, 
+        latest_exp_dir, module, agent_backend, difficulty, law_version_str, 
         f"{system}_noise{noise_str}_v*"
     )
     
     existing_dirs = glob.glob(base_pattern)
     if existing_dirs:
-        # Find the highest version number
         version_nums = []
         for path in existing_dirs:
             try:
@@ -55,13 +60,12 @@ def get_experiment_path(model_name: str, module: str, agent_backend: str, diffic
                 continue
         latest_version = max(version_nums) if version_nums else 0
         return os.path.join(
-            "evaluation_results", model_name, module, agent_backend, difficulty, law_version_str,
+            latest_exp_dir, module, agent_backend, difficulty, law_version_str,
             f"{system}_noise{noise_str}_v{latest_version}"
         )
     else:
-        # No existing directory, will be created as v1
         return os.path.join(
-            "evaluation_results", model_name, module, agent_backend, difficulty, law_version_str,
+            latest_exp_dir, module, agent_backend, difficulty, law_version_str,
             f"{system}_noise{noise_str}_v1"
         )
 
@@ -342,6 +346,9 @@ def main():
             return
     
     # Execute experiments
+    exp_id = get_next_exp_id(args.model_name)
+    print(f"Experiment ID: exp_{exp_id}")
+    
     print("\n" + "="*80)
     print("STARTING EXPERIMENT EXECUTION")
     print("="*80)
@@ -363,7 +370,8 @@ def main():
             "--trials", str(config['trials_needed']),
             "--model_name", args.model_name,
             "--agent_backend", args.agent_backend,
-            "--noise", str(config['noise_level'])
+            "--noise", str(config['noise_level']),
+            "--exp_id", str(exp_id)
         ]
 
         print(f"Command: {' '.join(command)}")

@@ -5,12 +5,13 @@ import time
 import sys
 import importlib
 import re
-from datetime import datetime
+
 from multiprocessing import Pool, cpu_count
 import numpy as np
 import traceback
 import pandas as pd
 
+from utils.exp_dir import make_exp_dir, get_next_exp_id
 from utils.vanilla_agent import conduct_exploration
 import warnings
 warnings.filterwarnings("ignore")
@@ -69,7 +70,7 @@ def write_fail_result_with_retries(args, final_error, retry_history, func_sig):
 
 def extract_version_from_path(results_dir):
     """Extract version (v10, v15, etc.) from results directory path"""
-    # Extract from path like: evaluation_results/dsr1/m0_gravity/vanilla_agent/easy/v0/function_noise0_0_v2/
+    # Extract from path like: evaluation_results/dsr1/exp_1/m0_gravity/vanilla_agent/easy/v0/function_noise0_0_v2/
     match = re.search(r'v(\d+)$', results_dir.rstrip('/'))
     if match:
         return f"v{match.group(1)}"
@@ -181,7 +182,7 @@ def run_trial(args):
                 "error_type": error_type,
                 "error_message": error_msg,
                 "traceback": tb_str,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
             }
             retry_history.append(retry_record)
             
@@ -204,12 +205,20 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     
     print(f"--- Running experiment for law_version: {law_version} with {num_trials} trials ---")
 
-    # Create unique results directory with hierarchical structure
+    # Create unique results directory with exp_<N> structure
     noise_str = str(cli_args.noise).replace('.', '_')
     law_version_str = law_version if law_version is not None else "random"
-    curr_time = datetime.now()
-    formatted = curr_time.strftime("%Y%m%d_%H%M")
-    base_dir = os.path.join("evaluation_results", cli_args.model_name, formatted, cli_args.module, cli_args.agent_backend, cli_args.equation_difficulty, law_version_str)
+
+    exp_id = getattr(cli_args, 'exp_id', None)
+    if exp_id is None:
+        exp_id = get_next_exp_id(cli_args.model_name)
+        exp_dir = os.path.join("evaluation_results", cli_args.model_name, f"exp_{exp_id}")
+        os.makedirs(exp_dir, exist_ok=True)
+    else:
+        exp_dir = os.path.join("evaluation_results", cli_args.model_name, f"exp_{exp_id}")
+        os.makedirs(exp_dir, exist_ok=True)
+
+    base_dir = os.path.join(exp_dir, cli_args.module, cli_args.agent_backend, cli_args.equation_difficulty, law_version_str)
     
     version_num = 1
     while True:
@@ -376,6 +385,8 @@ if __name__ == "__main__":
                       help="Specific law version to use, 'all' for all versions, or None for random selection or a specific version (e.g. v0, v1, v2)")
     parser.add_argument("-b", "--agent_backend", type=str, default="vanilla_agent", choices=["vanilla_agent", "code_assisted_agent"],
                       help="Agent backend to use for exploration. Default is vanilla_agent. When code_assisted_agent is selected, LLM is equipped with <python> tool use.")
+    parser.add_argument("--exp_id", type=int, default=None,
+                      help="Experiment ID for exp_<N> directory. Auto-detected if not specified.")
     cli_args = parser.parse_args()
 
     # --- Pre-flight Check ---

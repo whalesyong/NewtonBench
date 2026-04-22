@@ -1,4 +1,5 @@
 import os
+import time as _time
 from datetime import datetime
 import json
 import requests
@@ -181,11 +182,55 @@ def safe_json_parse(response_text):
     return response_text, f"JSON parsing failed: {error}"
 
 
-def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=None):
+API_TIMEOUT = 300
+API_MAX_RETRIES = 3
+API_RETRY_BACKOFF = 10
+
+_TIMEOUT_EXCEPTION_NAMES = frozenset([
+    "APITimeoutError", "Timeout", "ReadTimeout", "ConnectTimeout",
+    "ConnectionError",
+])
+
+
+def _is_timeout_error(exc):
+    for name in _TIMEOUT_EXCEPTION_NAMES:
+        if type(exc).__name__ == name:
+            return True
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _TIMEOUT_EXCEPTION_NAMES:
+            return True
+    module_name = getattr(type(exc), "__module__", "")
+    if module_name and any(pat in module_name for pat in ("openai", "httpx", "urllib3", "requests")):
+        if any(tok in str(exc).lower() for tok in ("timed out", "timeout", "timed_out")):
+            return True
+    return False
+
+
+def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=None, _max_retries=None):
     """
     Calls a large language model API based on the specified model name.
-    Now includes robust JSON parsing for malformed responses.
+    Now includes robust JSON parsing for malformed responses, timeout
+    configuration, and automatic retry with exponential backoff for
+    timeout errors.
     """
+    if _max_retries is None:
+        _max_retries = API_MAX_RETRIES
+
+    trial_id = trial_info.get('trial_id', "unknown") if trial_info else "unknown"
+
+    for attempt in range(1, _max_retries + 1):
+        try:
+            return _call_llm_api_inner(messages, model_name, keys=keys, temperature=temperature, trial_info=trial_info)
+        except Exception as e:
+            if _is_timeout_error(e) and attempt < _max_retries:
+                wait = API_RETRY_BACKOFF * (2 ** (attempt - 1))
+                print(f"[Trial {trial_id}] Timeout on attempt {attempt}/{_max_retries}, retrying in {wait}s... ({type(e).__name__}: {e})")
+                _time.sleep(wait)
+                continue
+            raise
+
+
+def _call_llm_api_inner(messages, model_name, keys=keys, temperature=0.4, trial_info=None):
     # Resolve provider and provider-specific model id based on key availability and mapping
     api_source, full_model_name = resolve_model_and_source(model_name, keys)
 
@@ -208,7 +253,8 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
                     "Authorization": f"Bearer {keys['or']}",
                     "Content-Type": "application/json",
                 },
-                data=json.dumps(params)
+                data=json.dumps(params),
+                timeout=API_TIMEOUT
             )
             response.raise_for_status()
             
@@ -273,7 +319,7 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
     
     elif api_source == "oa":
         try:
-            client = OpenAI(api_key=keys['oa'])
+            client = OpenAI(api_key=keys['oa'], timeout=API_TIMEOUT)
             model_with_fix_temp = ["o4mini", "gpt5", "gpt5mini"] 
             if model_name in model_with_fix_temp:
                 temperature = 1.0
@@ -298,7 +344,7 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
     elif api_source == "vl":
         try:
             vllm_port = os.getenv("VLLM_PORT", "8000")
-            client = OpenAI(api_key=keys['vl'], base_url=f"http://localhost:{vllm_port}/v1")
+            client = OpenAI(api_key=keys['vl'], base_url=f"http://localhost:{vllm_port}/v1", timeout=API_TIMEOUT)
             completion = client.chat.completions.create(
                 model=full_model_name,
                 messages=messages,
@@ -319,7 +365,7 @@ def call_llm_api(messages, model_name, keys=keys, temperature=0.4, trial_info=No
     elif api_source == "vj":
         try:
             judge_port = os.getenv("JUDGE_PORT", "8000")
-            client = OpenAI(api_key=keys['vj'], base_url=f"http://localhost:{judge_port}/v1")
+            client = OpenAI(api_key=keys['vj'], base_url=f"http://localhost:{judge_port}/v1", timeout=API_TIMEOUT)
             completion = client.chat.completions.create(
                 model=full_model_name,
                 messages=messages,
