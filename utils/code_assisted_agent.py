@@ -1,124 +1,118 @@
 import json
 import time
 from typing import Dict, List, Any, Optional
+from copy import deepcopy
 from .code_executor import CodeExecutor
 from .call_llm_api import call_llm_api
 import re
 
 
-def conduct_code_assisted_exploration(
+def _call_llm_and_format_response(messages, model_name: str, trial_info: Dict[str, Any], temperature: float):
+    api_result = call_llm_api(messages, model_name, trial_info=trial_info, temperature=temperature)
+    if len(api_result) == 3:
+        response, reasoning_content, tokens = api_result
+    elif len(api_result) == 2:
+        response, tokens = api_result
+        reasoning_content = None
+    else:
+        raise ValueError(f"Unexpected return format from call_llm_api: {len(api_result)} values")
+
+    if response is None:
+        response = ""
+
+    if reasoning_content and reasoning_content.strip():
+        combined_content = f"**Reasoning Process:**\n{reasoning_content}\n\n**Main Response:**\n{response}"
+    else:
+        combined_content = response
+
+    return response, combined_content, tokens
+
+
+def normalize_saved_chat_history_for_messages(chat_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Strip chat-history-only labels before reusing saved messages as model input."""
+    prefixes = (
+        "[Code Execution Feedback - Turn Limit]\n",
+        "[Code Execution Feedback]\n",
+        "[Experiment Results]\n",
+    )
+
+    normalized: List[Dict[str, str]] = []
+    for msg in chat_history:
+        new_msg = dict(msg)
+        if new_msg.get("role") == "user":
+            content = new_msg.get("content") or ""
+            for prefix in prefixes:
+                if content.startswith(prefix):
+                    content = content[len(prefix):].lstrip()
+                    break
+            new_msg["content"] = content
+        normalized.append(new_msg)
+    return normalized
+
+
+def _run_from_messages(
     module,
     model_name: str,
+    messages: List[Dict[str, str]],
     noise_level: float,
     difficulty: str,
     system: str,
     law_version: str = None,
-    trial_info: Dict[str, Any] = None
+    max_turns: int = 10,
+    start_turn: int = 0,
+    trial_info: Dict[str, Any] = None,
+    temperature: float = 0.4,
+    chat_history: Optional[List[Dict[str, str]]] = None,
+    total_tokens: int = 0,
+    num_experiments: int = 0,
+    python_tags_used_total: int = 0,
 ) -> Dict[str, Any]:
-    """
-    Conduct physics discovery exploration using code assistant with per-turn Python call limits.
-    
-    Args:
-        module: The physics module to explore
-        model_name: Name of the LLM model to use
-        noise_level: Noise level for experiments
-        difficulty: Difficulty level ('easy', 'medium', 'hard')
-        system: Experiment system ('vanilla_equation', 'simple_system', 'complex_system')
-        law_version: Specific law version to use
-        trial_info: Additional trial information
-        
-    Returns:
-        Dictionary containing exploration results
-    """
-    
-    # Initialize trial_info if not provided
+    """Continue code-assisted exploration from a pre-populated message history."""
     trial_info = trial_info or {}
-    
-    # Initialize code executor
+    if chat_history is None:
+        chat_history = deepcopy(messages)
+
     code_executor = CodeExecutor(
         module_name=module.__name__.split('.')[-1],
         difficulty=difficulty,
         system=system
     )
+    code_executor.turn_number = start_turn
 
-    max_turns = 10  # Limit to prevent infinite loops
-    # Create code assisted agent-specific system prompt
-    system_prompt = create_code_assisted_system_prompt(module, difficulty, system, max_turns)
-    
-    # Initialize conversation with just the system prompt
-    messages = [
-        {"role": "system", "content": system_prompt}
-    ]
-    
-    # Add the task prompt as the first user message
-    task_prompt = module.get_task_prompt(system, is_code_assisted=True, noise_level=noise_level)
-    messages.append({"role": "user", "content": task_prompt})
-    
-    # Initialize chat history with the system and task prompts
-    chat_history = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": task_prompt}
-    ]
-    total_tokens = 0
-    num_experiments = 0
-    python_tags_used_total = 0  # Counter for Python tags across entire trial
-    
-    # Extract trial identifier for logging
-    trial_id = trial_info.get('trial_id', 'unknown') if trial_info else 'unknown'
-    
+    trial_id = trial_info.get('trial_id', 'unknown')
     print(f"[Code Assisted Trial {trial_id}] Starting exploration for {module.__name__} - {difficulty} {system}")
-    
+
     trial_completed = False
-    for turn in range(max_turns):
-        # Check if trial is already completed (final law submitted)
+    last_turn = start_turn - 1
+
+    for turn in range(start_turn, max_turns):
+        last_turn = turn
         if trial_completed:
             break
-            
-        # Reset Python call counter for new turn
+
         code_executor.reset_turn_counter()
-        
-        # Inner loop for multiple Python calls per turn
         turn_completed = False
-        
+
         while not turn_completed and code_executor.can_execute_python():
             try:
-                # Add per-turn reminder about <python> availability
-                turn_reminder = f"You can use either <run_experiment> to collect more data or use <python> tag to do some analysis. You should distribute your action wisely. Only submit your law using the <final_law> tag when you are confident."
+                turn_reminder = "You can use either <run_experiment> to collect more data or use <python> tag to do some analysis. You should distribute your action wisely. Only submit your law using the <final_law> tag when you are confident."
                 if messages and messages[-1]["role"] == "user":
                     messages[-1]["content"] += "\n\n" + turn_reminder
                     chat_history[-1]["content"] += "\n\n" + turn_reminder
                 else:
                     messages.append({"role": "user", "content": turn_reminder})
                     chat_history.append({"role": "user", "content": turn_reminder})
-                
-                api_result = call_llm_api(messages, model_name, trial_info=trial_info)
-                # Handle different return formats from call_llm_api
-                if len(api_result) == 3:
-                    response, reasoning_content, tokens = api_result
-                elif len(api_result) == 2:
-                    response, tokens = api_result
-                    reasoning_content = None
-                else:
-                    raise ValueError(f"Unexpected return format from call_llm_api: {len(api_result)} values")
-                
+
+                response, combined_content, tokens = _call_llm_and_format_response(
+                    messages, model_name, trial_info, temperature
+                )
                 total_tokens += tokens
 
-                if response is None:
-                    response = ""
-                
-                # Combine main response with reasoning if available
-                if reasoning_content and reasoning_content.strip():
-                    combined_content = f"**Reasoning Process:**\n{reasoning_content}\n\n**Main Response:**\n{response}"
-                else:
-                    combined_content = response
-
-                # Add LLM response to chat history
                 chat_history.append({
                     "role": "assistant",
                     "content": combined_content
                 })
-                
-                # Check if LLM has submitted final law
+
                 if response and "<final_law>" in response and "</final_law>" in response:
                     print(f"[Code Assisted Trial {trial_id}] Final law submitted on turn {turn + 1}")
                     trial_completed = True
@@ -127,64 +121,38 @@ def conduct_code_assisted_exploration(
 
                 python_pos = response.rfind('<python>')
                 experiment_pos = response.rfind('<run_experiment>')
-     
-                # Process Python code if present
                 code_result = code_executor.process_llm_response(response)
-                
+
                 if code_result['has_python_tag'] and python_pos > experiment_pos:
-                    # Check if we've reached the turn limit
                     if code_result.get('limit_reached', False):
-                        # Python limit reached for this turn
                         print(f"[Code Assisted Trial {trial_id}] Python call limit reached for turn {turn + 1}")
-                        
-                        # Format feedback for LLM with turn limit info
                         feedback = code_executor.format_execution_feedback(code_result)
-                        
-                        # Add feedback to conversation
                         messages.append({"role": "assistant", "content": combined_content})
                         messages.append({"role": "user", "content": feedback})
-                        
-                        # Add feedback to chat history
                         chat_history.append({
                             "role": "user",
                             "content": f"[Code Execution Feedback - Turn Limit]\n{feedback}"
                         })
-                        
-                        # End this turn
                         turn_completed = True
                         break
-                    
-                    # Increment Python tag counter
+
                     python_tags_used_total += 1
-                    # Process Python code execution
                     print(f"[Code Assisted Trial {trial_id}] Processing Python code in turn {turn + 1}")
-                    
-                    # Format feedback for LLM with turn-specific usage info
                     feedback = code_executor.format_execution_feedback(code_result)
-                    
-                    # Add feedback to conversation
                     messages.append({"role": "assistant", "content": combined_content})
                     messages.append({"role": "user", "content": feedback})
-                    
-                    # Add feedback to chat history
                     chat_history.append({
                         "role": "user",
                         "content": f"[Code Execution Feedback]\n{feedback}"
                     })
-                    
                 else:
-                    # No Python code or experiment tag, handle other actions
                     messages.append({"role": "assistant", "content": combined_content})
-                    
-                    # Check if we need to run experiments
+
                     if response and "<run_experiment>" in response and "</run_experiment>" in response:
                         print(f"[Code Assisted Trial {trial_id}] Running experiment {num_experiments} in turn {turn + 1}")
-                        
-                        # Extract experiment parameters and run experiment
                         experiment_result = run_experiment_from_response(module, response, system, noise_level, difficulty, law_version)
-                        
+
                         if experiment_result:
-                            # Add experiment results to conversation
                             if isinstance(experiment_result, list):
                                 num_experiments += len(experiment_result)
                             else:
@@ -211,69 +179,104 @@ def conduct_code_assisted_exploration(
                             messages.append({"role": "user", "content": reminder_message})
                             chat_history.append({"role": "user", "content": reminder_message})
                         print(f"[Code Assisted Trial {trial_id}] Invalid response in turn {turn + 1}")
-                    
-                    # End this turn after handling non-Python actions
+
                     turn_completed = True
                     break
-                
-                # Add small delay to prevent API rate limiting
+
                 time.sleep(1)
-                
+
             except Exception as e:
                 print(f"[Code Assisted Trial {trial_id}] Error in turn {turn + 1}: {e}")
                 raise e
-        
-        # If we've processed all Python calls for this turn and haven't completed, continue to next turn
+
         if not turn_completed and not code_executor.can_execute_python():
             print(f"[Code Assisted Trial {trial_id}] Turn {turn + 1} completed - Python call limit reached")
-            turn_completed = True
-    
-    else:
-        # If max turns are reached and trial not completed, force submission
-        if not trial_completed:
-            final_prompt = f"**IMPORTANT:**\nYou have used all your experiment turns. Please submit your final law now using the <final_law> tag. Besides, remember that the function signature should be {module.FUNCTION_SIGNATURE}. All other variables needed to be defined inside the function. No comments are allowed inside the function."
-            if messages and messages[-1]["role"] == "user":
-                messages[-1]["content"] += "\n\n" + final_prompt
-                chat_history[-1]["content"] += "\n\n" + final_prompt
-            else:
-                messages.append({"role": "user", "content": final_prompt})
-                chat_history.append({"role": "user", "content": final_prompt})
 
-            # Call LLM one last time to get the final law
-            api_result = call_llm_api(messages, model_name, trial_info=trial_info)
-            if len(api_result) == 3:
-                response, reasoning_content, tokens = api_result
-            elif len(api_result) == 2:
-                response, tokens = api_result
-                reasoning_content = None
-            else:
-                raise ValueError(f"Unexpected return format from call_llm_api: {len(api_result)} values")
+    if not trial_completed:
+        final_prompt = f"**IMPORTANT:**\nYou have used all your experiment turns. Please submit your final law now using the <final_law> tag. Besides, remember that the function signature should be {module.FUNCTION_SIGNATURE}. All other variables needed to be defined inside the function. No comments are allowed inside the function."
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] += "\n\n" + final_prompt
+            chat_history[-1]["content"] += "\n\n" + final_prompt
+        else:
+            messages.append({"role": "user", "content": final_prompt})
+            chat_history.append({"role": "user", "content": final_prompt})
 
-            total_tokens += tokens
+        response, combined_content, tokens = _call_llm_and_format_response(
+            messages, model_name, trial_info, temperature
+        )
+        total_tokens += tokens
+        chat_history.append({"role": "assistant", "content": combined_content})
+        if last_turn < max_turns - 1:
+            last_turn = max_turns - 1
 
-            if reasoning_content and reasoning_content.strip():
-                combined_content = f"**Reasoning Process:**\n{reasoning_content}\n\n**Main Response:**\n{response}"
-            else:
-                combined_content = response
+    final_rounds = max(last_turn + 1, start_turn)
+    print(f"[Code Assisted Trial {trial_id}] Exploration completed after {final_rounds} turns")
 
-            chat_history.append({"role": "assistant", "content": combined_content})
-
-    print(f"[Code Assisted Trial {trial_id}] Exploration completed after {turn + 1} turns")
-    
-    # Extract final law if present
     submitted_law = extract_final_law(chat_history, module)
-    
+
     return {
         "status": "completed" if trial_completed else "max_turns_reached",
         "submitted_law": submitted_law,
         "chat_history": chat_history,
-        "rounds": turn + 1,
+        "rounds": final_rounds,
         "max_turns": max_turns,
         "total_tokens": total_tokens,
         "python_tags_used_total": python_tags_used_total,
         "num_experiments": num_experiments,
         "exploration_mode": "code_assisted_agent"
     }
+
+
+def conduct_code_assisted_exploration(
+    module,
+    model_name: str,
+    noise_level: float,
+    difficulty: str,
+    system: str,
+    law_version: str = None,
+    trial_info: Dict[str, Any] = None,
+    temperature: float = 0.4,
+) -> Dict[str, Any]:
+    """
+    Conduct physics discovery exploration using code assistant with per-turn Python call limits.
+    
+    Args:
+        module: The physics module to explore
+        model_name: Name of the LLM model to use
+        noise_level: Noise level for experiments
+        difficulty: Difficulty level ('easy', 'medium', 'hard')
+        system: Experiment system ('vanilla_equation', 'simple_system', 'complex_system')
+        law_version: Specific law version to use
+        trial_info: Additional trial information
+        temperature: Sampling temperature passed to the LLM API
+        
+    Returns:
+        Dictionary containing exploration results
+    """
+    trial_info = trial_info or {}
+
+    max_turns = 10
+    system_prompt = create_code_assisted_system_prompt(module, difficulty, system, max_turns)
+    task_prompt = module.get_task_prompt(system, is_code_assisted=True, noise_level=noise_level)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task_prompt},
+    ]
+
+    return _run_from_messages(
+        module=module,
+        model_name=model_name,
+        messages=messages,
+        chat_history=deepcopy(messages),
+        noise_level=noise_level,
+        difficulty=difficulty,
+        system=system,
+        law_version=law_version,
+        max_turns=max_turns,
+        start_turn=0,
+        trial_info=trial_info,
+        temperature=temperature,
+    )
 
 def create_code_assisted_system_prompt(module, difficulty: str, system: str, max_turns: int) -> str:
     """
