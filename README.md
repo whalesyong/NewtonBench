@@ -194,6 +194,12 @@ NewtonBench/
 
 To replicate more comprehensive evaluations as described in the paper, the `run_master.py` script allows you to run the full benchmark across all physics modules and a variety of LLM models.
 
+By default, `run_master.py` schedules both supported agent backends:
+- `vanilla_agent`
+- `code_assisted_agent`
+
+You can override this with `--agent_backends`, which accepts a comma-separated list.
+
 ### Method 1: Using `models.txt`
 
 You can specify a list of LLM models to test by editing the `configs/models.txt` file. The default file includes all 11 LLMs evaluated in our paper
@@ -214,12 +220,30 @@ Once you have configured the `models.txt` file, you can run the benchmark with t
 python run_master.py --parallel 5
 ```
 
+To run only the code-assisted backend:
+
+```
+python run_master.py --parallel 5 --agent_backends code_assisted_agent
+```
+
+To run only the vanilla backend:
+
+```
+python run_master.py --parallel 5 --agent_backends vanilla_agent
+```
+
 ### Method 2: Specifying a Single Model
 
 If you want to run the benchmark for a single model, you can use the `--model_name` command-line argument.
 
 ```
 python run_master.py --model_name gpt41mini --parallel 5
+```
+
+You can combine this with `--agent_backends`. For example, to run only the code-assisted backend for one model:
+
+```
+python run_master.py --model_name gpt41mini --parallel 5 --agent_backends code_assisted_agent
 ```
 
 ### Controlling Parallelism
@@ -229,6 +253,12 @@ The `--parallel` argument controls the number of concurrent processes. A higher 
 ```
 # Run 8 experiments in parallel
 python run_master.py --parallel 8
+```
+
+To preview the exact commands without launching experiments, use:
+
+```
+python run_master.py --model_name gpt41mini --agent_backends vanilla_agent --print_only
 ```
 
 ### 📈 Analyzing Results

@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import List, Sequence
 
 
+VALID_AGENT_BACKENDS = ("vanilla_agent", "code_assisted_agent")
+
+
 def discover_modules(modules_root: Path) -> List[str]:
     if not modules_root.exists():
         raise FileNotFoundError(f"Modules directory not found: {modules_root}")
@@ -51,6 +54,7 @@ def build_commands(
     repo_root: Path,
     modules: Sequence[str],
     models: Sequence[str],
+    agent_backends: Sequence[str],
 ) -> List[List[str]]:
     run_all = repo_root / "run_all_evaluations.py"
     if not run_all.exists():
@@ -58,7 +62,7 @@ def build_commands(
     commands: List[List[str]] = []
     for model in models:
         for module in modules:
-            for backend in ["vanilla_agent", "code_assisted_agent"]:
+            for backend in agent_backends:
                 cmd = [
                     "python",
                     "run_all_evaluations.py",
@@ -177,6 +181,25 @@ def resolve_models(repo_root: Path, model_name: str, models_file: Path) -> List[
     )
 
 
+def parse_agent_backends(agent_backends_str: str) -> List[str]:
+    backends = [backend.strip() for backend in agent_backends_str.split(",") if backend.strip()]
+    if not backends:
+        raise ValueError("--agent_backends must include at least one backend.")
+
+    invalid_backends = [backend for backend in backends if backend not in VALID_AGENT_BACKENDS]
+    if invalid_backends:
+        raise ValueError(
+            f"Invalid backend(s): {', '.join(invalid_backends)}. "
+            f"Choose from: {', '.join(VALID_AGENT_BACKENDS)}."
+        )
+
+    deduped_backends: List[str] = []
+    for backend in backends:
+        if backend not in deduped_backends:
+            deduped_backends.append(backend)
+    return deduped_backends
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -196,17 +219,28 @@ def main():
         action="store_true",
         help="Only print the commands that would be run and exit.",
     )
+    parser.add_argument(
+        "--agent_backends",
+        type=str,
+        default="vanilla_agent,code_assisted_agent",
+        help=(
+            "Comma-separated agent backends to run. "
+            "Choices: vanilla_agent, code_assisted_agent."
+        ),
+    )
 
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
     modules = discover_modules(repo_root / "modules")
     models = resolve_models(repo_root, args.model_name, Path(args.models_file))
+    agent_backends = parse_agent_backends(args.agent_backends)
 
-    commands = build_commands(repo_root, modules, models)
+    commands = build_commands(repo_root, modules, models, agent_backends)
 
     # Always show the commands before running
     print("Planned commands ({} total):".format(len(commands)))
+    print("Agent backends: {}".format(", ".join(agent_backends)))
     print_commands(commands, repo_root)
 
     if args.print_only:
