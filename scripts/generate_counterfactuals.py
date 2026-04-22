@@ -106,6 +106,11 @@ def _format_backend_counts(counts: Counter) -> str:
     return ", ".join(f"{backend}={counts[backend]}" for backend in sorted(counts))
 
 
+def _log(verbose: bool, message: str) -> None:
+    if verbose:
+        print(message)
+
+
 # ---------------------------------------------------------------------------
 # Scoring & preference
 # ---------------------------------------------------------------------------
@@ -161,15 +166,18 @@ def generate_one(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     judge_model_name: str = task["judge_model_name"]
     rng_seed: int = task["rng_seed"]
     pair_index: int = task["pair_index"]
+    verbose: bool = task.get("verbose", False)
 
     rng = random.Random(rng_seed)
 
     trial = load_trial(Path(trial_path))
     if trial is None:
+        _log(verbose, f"[PAIR {pair_index}] Skipping unreadable trial: {trial_path}")
         return None
 
     chat_history = trial.get("chat_history") or []
     if not chat_history:
+        _log(verbose, f"[PAIR {pair_index}] Skipping trial with empty chat history: {trial_path}")
         return None
 
     agent_backend = trial.get("agent_backend", "vanilla_agent")
@@ -179,6 +187,7 @@ def generate_one(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     branch_points = find_branch_points(chat_history, agent_backend)
     if not branch_points:
+        _log(verbose, f"[PAIR {pair_index}] No branch points found for {trial_path}")
         return None
 
     # Leave at least 1 remaining turn for the counterfactual to explore, and honor the
@@ -189,6 +198,7 @@ def generate_one(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if min_branch_turn <= bp[0] <= max_turns - 1
     ]
     if not viable:
+        _log(verbose, f"[PAIR {pair_index}] No viable branch points after min/max turn filter for {trial_path}")
         return None
 
     branch_turn, branch_msg_idx = rng.choice(viable)
@@ -204,6 +214,12 @@ def generate_one(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if module_name is None or model_name is None:
         print(f"[WARN] {trial_path}: missing module_name or model_name; skipping.")
         return None
+
+    _log(
+        verbose,
+        f"[PAIR {pair_index}] trial={trial_path} backend={agent_backend} module={module_name} "
+        f"branch_turn={branch_turn} branch_msg_idx={branch_msg_idx} viable_branches={len(viable)}"
+    )
 
     try:
         module = importlib.import_module(f"modules.{module_name}")
@@ -295,6 +311,13 @@ def generate_one(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         preferred = "tie"
 
+    _log(
+        verbose,
+        f"[PAIR {pair_index}] original_acc={original_eval.get('exact_accuracy')} "
+        f"cf_acc={cf_eval.get('exact_accuracy')} original_rmsle={original_eval.get('rmsle')} "
+        f"cf_rmsle={cf_eval.get('rmsle')} preference={preferred}"
+    )
+
     return {
         "pair_index": pair_index,
         "trial_source": trial_path,
@@ -350,6 +373,8 @@ def main() -> int:
                         help="Top-level RNG seed for trajectory sampling and branch-point choice.")
     parser.add_argument("--workers", type=int, default=1,
                         help="Parallel worker processes (default: 1).")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print per-pair sampling, branching, and evaluation details.")
     parser.add_argument("--sample-with-replacement", action="store_true",
                         help="Sample trajectories with replacement (default: without, capped at num available).")
     parser.add_argument("--min-branch-turn", type=int, default=1,
@@ -408,6 +433,18 @@ def main() -> int:
             print(f"[WARN] Only {len(branchable)} unique branchable trials; producing {n} pairs "
                   f"(use --sample-with-replacement to reach {args.num_traj}).")
 
+    if args.verbose:
+        sampled_by_backend: Counter = Counter()
+        for p in sampled:
+            t = load_trial(p)
+            if t is None:
+                continue
+            sampled_by_backend[t.get("agent_backend", "vanilla_agent")] += 1
+        print(f"[INFO] Sampled {len(sampled)} trials for rollout.")
+        print(f"[INFO] Sampled trials by backend: {_format_backend_counts(sampled_by_backend)}")
+        for i, p in enumerate(sampled):
+            print(f"[SAMPLED {i}] {p}")
+
     # Build tasks with per-pair seeds so branch-point choice is reproducible.
     tasks: List[Dict[str, Any]] = []
     for i, p in enumerate(sampled):
@@ -419,6 +456,7 @@ def main() -> int:
             "judge_model_name": args.judge_model_name,
             "rng_seed": rng.randint(0, 2**31 - 1),
             "pair_index": i,
+            "verbose": args.verbose,
         })
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
