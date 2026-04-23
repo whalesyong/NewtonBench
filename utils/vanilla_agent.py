@@ -31,6 +31,9 @@ You can perform experiments to gather data but you must follow the protocol stri
 8.  You should verify your hypotheses by checking if the output from the experiments matches the output from your hypotheses.
 9.  When confident, submit your final discovered law using the `<final_law>` tag. This ends the mission."""
 
+INVALID_RESPONSE_PROMPT = "Invalid response. Please use <run_experiment> tag with the correct JSON format or <final_law> tag to submit the law."
+FINAL_LAW_PROMPT = "You have used all your experiment turns. Please submit your final law now using the <final_law> tag."
+
 def parse_experiment_request(response_text: str) -> List[Dict[str, float]]:
     """Parses the LLM's requested experiments from the <run_experiment> block (expects JSON array)."""
     start_tag = '<run_experiment>'
@@ -154,10 +157,10 @@ def _run_from_messages(
             messages.append({"role": "user", "content": output_str})
         else:
             # If no valid action, prompt the LLM to act
-            messages.append({"role": "user", "content": "Invalid response. Please use <run_experiment> tag with the correct JSON format or <final_law> tag to submit the law."})
+            messages.append({"role": "user", "content": INVALID_RESPONSE_PROMPT})
 
     # If max turns are reached, force submission
-    final_prompt = "You have used all your experiment turns. Please submit your final law now using the <final_law> tag."
+    final_prompt = FINAL_LAW_PROMPT
     if messages and messages[-1]["role"] == "user":
         messages[-1]["content"] += "\n\n" + final_prompt
     else:

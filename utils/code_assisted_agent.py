@@ -7,6 +7,14 @@ from .call_llm_api import call_llm_api
 import re
 
 
+TURN_REMINDER = "You can use either <run_experiment> to collect more data or use <python> tag to do some analysis. You should distribute your action wisely. Only submit your law using the <final_law> tag when you are confident."
+FINAL_SUBMISSION_PROMPT_TEMPLATE = "**IMPORTANT:**\nYou have used all your experiment turns. Please submit your final law now using the <final_law> tag. Besides, remember that the function signature should be {function_signature}. All other variables needed to be defined inside the function. No comments are allowed inside the function."
+
+
+def build_final_submission_prompt(module) -> str:
+    return FINAL_SUBMISSION_PROMPT_TEMPLATE.format(function_signature=module.FUNCTION_SIGNATURE)
+
+
 def _call_llm_and_format_response(messages, model_name: str, trial_info: Dict[str, Any], temperature: float):
     api_result = call_llm_api(messages, model_name, trial_info=trial_info, temperature=temperature)
     if len(api_result) == 3:
@@ -95,7 +103,7 @@ def _run_from_messages(
 
         while not turn_completed and code_executor.can_execute_python():
             try:
-                turn_reminder = "You can use either <run_experiment> to collect more data or use <python> tag to do some analysis. You should distribute your action wisely. Only submit your law using the <final_law> tag when you are confident."
+                turn_reminder = TURN_REMINDER
                 if messages and messages[-1]["role"] == "user":
                     messages[-1]["content"] += "\n\n" + turn_reminder
                     chat_history[-1]["content"] += "\n\n" + turn_reminder
@@ -193,7 +201,7 @@ def _run_from_messages(
             print(f"[Code Assisted Trial {trial_id}] Turn {turn + 1} completed - Python call limit reached")
 
     if not trial_completed:
-        final_prompt = f"**IMPORTANT:**\nYou have used all your experiment turns. Please submit your final law now using the <final_law> tag. Besides, remember that the function signature should be {module.FUNCTION_SIGNATURE}. All other variables needed to be defined inside the function. No comments are allowed inside the function."
+        final_prompt = build_final_submission_prompt(module)
         if messages and messages[-1]["role"] == "user":
             messages[-1]["content"] += "\n\n" + final_prompt
             chat_history[-1]["content"] += "\n\n" + final_prompt
