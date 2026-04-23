@@ -55,6 +55,7 @@ def build_commands(
     modules: Sequence[str],
     models: Sequence[str],
     agent_backends: Sequence[str],
+    temperature: float,
 ) -> List[List[str]]:
     run_all = repo_root / "run_all_evaluations.py"
     if not run_all.exists():
@@ -72,6 +73,8 @@ def build_commands(
                     model,
                     "--agent_backend",
                     backend,
+                    "--temperature",
+                    str(temperature),
                     "--no_prompt",
                 ]
                 commands.append(cmd)
@@ -228,6 +231,12 @@ def main():
             "Choices: vanilla_agent, code_assisted_agent."
         ),
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.4,
+        help="Sampling temperature to pass through to experiment runs (default 0.4).",
+    )
 
     args = parser.parse_args()
 
@@ -236,11 +245,12 @@ def main():
     models = resolve_models(repo_root, args.model_name, Path(args.models_file))
     agent_backends = parse_agent_backends(args.agent_backends)
 
-    commands = build_commands(repo_root, modules, models, agent_backends)
+    commands = build_commands(repo_root, modules, models, agent_backends, args.temperature)
 
     # Always show the commands before running
     print("Planned commands ({} total):".format(len(commands)))
     print("Agent backends: {}".format(", ".join(agent_backends)))
+    print("Temperature: {}".format(args.temperature))
     print_commands(commands, repo_root)
 
     if args.print_only:

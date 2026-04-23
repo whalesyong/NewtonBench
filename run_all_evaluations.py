@@ -33,9 +33,11 @@ def get_law_versions_for_difficulty(module_name, difficulty):
         return []
 
 def get_experiment_path(model_name: str, module: str, agent_backend: str, difficulty: str, 
-                        law_version: str, system: str, noise_level: float) -> str:
+                        law_version: str, system: str, noise_level: float,
+                        temperature: float) -> str:
     """Generate standardized experiment directory path under the latest exp_<N> directory."""
     noise_str = str(noise_level).replace('.', '_')
+    temp_str = str(temperature).replace('.', '_')
     law_version_str = law_version if law_version is not None else "random"
     
     exp_dirs = find_exp_dirs(model_name)
@@ -46,7 +48,7 @@ def get_experiment_path(model_name: str, module: str, agent_backend: str, diffic
 
     base_pattern = os.path.join(
         latest_exp_dir, module, agent_backend, difficulty, law_version_str, 
-        f"{system}_noise{noise_str}_v*"
+        f"{system}_noise{noise_str}_temp{temp_str}_v*"
     )
     
     existing_dirs = glob.glob(base_pattern)
@@ -61,12 +63,12 @@ def get_experiment_path(model_name: str, module: str, agent_backend: str, diffic
         latest_version = max(version_nums) if version_nums else 0
         return os.path.join(
             latest_exp_dir, module, agent_backend, difficulty, law_version_str,
-            f"{system}_noise{noise_str}_v{latest_version}"
+            f"{system}_noise{noise_str}_temp{temp_str}_v{latest_version}"
         )
     else:
         return os.path.join(
             latest_exp_dir, module, agent_backend, difficulty, law_version_str,
-            f"{system}_noise{noise_str}_v1"
+            f"{system}_noise{noise_str}_temp{temp_str}_v1"
         )
 
 def check_experiment_completion(experiment_path: str, expected_trials: int = 4, model_name: str = None, agent_backend: str = None) -> Tuple[bool, int, int]:
@@ -165,10 +167,11 @@ def parse_noise_levels(noise_str: str) -> List[float]:
     except ValueError:
         raise argparse.ArgumentTypeError(f"Invalid noise levels: {noise_str}. Expected comma-separated floats.")
 
-def get_configuration_name(module: str, difficulty: str, system: str, law_version: str, noise_level: float) -> str:
+def get_configuration_name(module: str, difficulty: str, system: str, law_version: str,
+                           noise_level: float, temperature: float) -> str:
     """Generate human-readable configuration name."""
     law_str = law_version if law_version is not None else "random"
-    return f"{module}/{difficulty}/{system}/{law_str}/noise{noise_level}"
+    return f"{module}/{difficulty}/{system}/{law_str}/noise{noise_level}/temp{temperature}"
 
 def main():
     parser = argparse.ArgumentParser(description="Run all evaluations for all modules with noise level iteration and resume capability.")
@@ -182,6 +185,8 @@ def main():
                       help="Model system selected to test the agent: vanilla_equation, simple_system, complex_system")
     parser.add_argument("-b", "--agent_backend", type=str, default="vanilla_agent", choices=["vanilla_agent", "code_assisted_agent"],
                       help="Agent backend to use for exploration. Default is vanilla_agent. When code_assisted_agent is selected, LLM is equipped with <python> tool use.")
+    parser.add_argument("--temperature", type=float, default=0.4,
+                      help="Sampling temperature to pass to the exploration agent (default: 0.4).")
     
     # Resume and control options
     parser.add_argument("--force_rerun", action="store_true", 
@@ -221,6 +226,7 @@ def main():
     print("="*80)
     print(f"Model: {args.model_name}")
     print(f"Agent Backend: {args.agent_backend}")
+    print(f"Temperature: {args.temperature}")
     print(f"Noise Levels: {noise_levels}")
     print(f"Trials per Configuration: {args.trials_per_law}")
     
@@ -272,9 +278,9 @@ def main():
                 
                 for system in filtered_systems:   
                     for law_version in law_versions:
-                        config_name = get_configuration_name(module_name, difficulty, system, law_version, noise_level)
+                        config_name = get_configuration_name(module_name, difficulty, system, law_version, noise_level, args.temperature)
                         experiment_path = get_experiment_path(args.model_name, module_name, args.agent_backend, 
-                                                           difficulty, law_version, system, noise_level)
+                                                           difficulty, law_version, system, noise_level, args.temperature)
                         
                         is_complete, completed_trials, expected_trials = check_experiment_completion(
                             experiment_path, args.trials_per_law, args.model_name, args.agent_backend)
@@ -371,6 +377,7 @@ def main():
             "--model_name", args.model_name,
             "--agent_backend", args.agent_backend,
             "--noise", str(config['noise_level']),
+            "--temperature", str(args.temperature),
             "--exp_id", str(exp_id)
         ]
 

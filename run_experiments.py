@@ -32,11 +32,12 @@ def format_chat_history(chat_history):
     return '\n'.join(lines)
 
 def write_fail_result_with_retries(args, final_error, retry_history, func_sig):
-    trial_id, noise_level, model_name, module_name, difficulty, system, law_version, trial_dir, max_retries, judge_model_name, agent_backend = args
+    trial_id, noise_level, model_name, module_name, difficulty, system, law_version, trial_dir, max_retries, judge_model_name, agent_backend, temperature = args
     fail_result = {
         "trial_id": trial_id,
         "module_name": module_name,
         "noise_level": noise_level,
+        "temperature": temperature,
         "model_name": model_name,
         "equation_difficulty": difficulty,
         "model_system": system,
@@ -85,8 +86,12 @@ def run_trial(args):
     - A `run_experiment_for_module(...)` function.
     - An `evaluate_law(str)` function.
     """
-    trial_id, noise_level, model_name, module_name, difficulty, system, law_version, trial_dir, max_retries, judge_model_name, agent_backend = args
-    print(f"Starting trial {trial_id} for module '{module_name}' with {model_name}, noise {noise_level} (equation difficulty: {difficulty}, model system: {system}, law version: {law_version}, backend: {agent_backend}")
+    trial_id, noise_level, model_name, module_name, difficulty, system, law_version, trial_dir, max_retries, judge_model_name, agent_backend, temperature = args
+    print(
+        f"Starting trial {trial_id} for module '{module_name}' with {model_name}, noise {noise_level} "
+        f"(temperature: {temperature}, equation difficulty: {difficulty}, model system: {system}, "
+        f"law version: {law_version}, backend: {agent_backend})"
+    )
     
     retry_history = []
     final_error = None
@@ -114,7 +119,8 @@ def run_trial(args):
                     difficulty=difficulty,
                     system=system,
                     law_version=law_version,
-                    trial_info=trial_info
+                    trial_info=trial_info,
+                    temperature=temperature,
                 )
             else:
                 exploration_result = conduct_exploration(
@@ -124,7 +130,8 @@ def run_trial(args):
                     difficulty=difficulty,
                     system=system,
                     law_version=law_version,
-                    trial_info=trial_info
+                    trial_info=trial_info,
+                    temperature=temperature,
                 )
 
             # 2. Evaluate the submitted law using the module's specific evaluator
@@ -142,6 +149,7 @@ def run_trial(args):
                 "trial_id": trial_id,
                 "module_name": module_name,
                 "noise_level": noise_level,
+                "temperature": temperature,
                 "model_name": model_name,
                 "equation_difficulty": difficulty,
                 "model_system": system,
@@ -207,6 +215,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
 
     # Create unique results directory with exp_<N> structure
     noise_str = str(cli_args.noise).replace('.', '_')
+    temp_str = str(cli_args.temperature).replace('.', '_')
     law_version_str = law_version if law_version is not None else "random"
 
     exp_id = getattr(cli_args, 'exp_id', None)
@@ -222,7 +231,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     
     version_num = 1
     while True:
-        experiment_name = f"{cli_args.model_system}_noise{noise_str}_v{version_num}"
+        experiment_name = f"{cli_args.model_system}_noise{noise_str}_temp{temp_str}_v{version_num}"
         full_path = os.path.join(base_dir, experiment_name)
         if not os.path.exists(full_path):
             break
@@ -237,7 +246,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     judge_model_name = "vllm-judge-local"
     
     pool_args = [
-        (i, cli_args.noise, cli_args.model_name, cli_args.module, cli_args.equation_difficulty, cli_args.model_system, law_version, trials_dir, max_retries, judge_model_name, cli_args.agent_backend)
+        (i, cli_args.noise, cli_args.model_name, cli_args.module, cli_args.equation_difficulty, cli_args.model_system, law_version, trials_dir, max_retries, judge_model_name, cli_args.agent_backend, cli_args.temperature)
         for i in range(num_trials)
     ]
     
@@ -306,6 +315,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
     print(f"  - Module Tested: {cli_args.module}")
     print(f"  - Model Name: {cli_args.model_name}")
     print(f"  - Noise Level: {cli_args.noise}")
+    print(f"  - Temperature: {cli_args.temperature}")
     print(f"  - Equation Difficulty: {cli_args.equation_difficulty}")
     print(f"  - Law Version: {law_version}")
     print(f"  - Model System: {cli_args.model_system}")
@@ -335,6 +345,7 @@ def run_experiment_for_version(cli_args, module, law_version, num_trials):
             "module": cli_args.module,
             "model_name": cli_args.model_name,
             "noise_level": cli_args.noise,
+            "temperature": cli_args.temperature,
             "equation_difficulty": cli_args.equation_difficulty,
             "law_version": law_version,
             "model_system": cli_args.model_system,
@@ -385,6 +396,8 @@ if __name__ == "__main__":
                       help="Specific law version to use, 'all' for all versions, or None for random selection or a specific version (e.g. v0, v1, v2)")
     parser.add_argument("-b", "--agent_backend", type=str, default="vanilla_agent", choices=["vanilla_agent", "code_assisted_agent"],
                       help="Agent backend to use for exploration. Default is vanilla_agent. When code_assisted_agent is selected, LLM is equipped with <python> tool use.")
+    parser.add_argument("--temperature", type=float, default=0.4,
+                      help="Sampling temperature to pass to the exploration agent (default: 0.4).")
     parser.add_argument("--exp_id", type=int, default=None,
                       help="Experiment ID for exp_<N> directory. Auto-detected if not specified.")
     cli_args = parser.parse_args()
