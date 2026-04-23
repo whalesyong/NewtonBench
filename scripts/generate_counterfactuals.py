@@ -348,30 +348,34 @@ def _stable_seed(trial_id: Any) -> int:
     return int(h[:8], 16)
 
 
+def _rmsle(e: Dict[str, Any]) -> float:
+    """Extract RMSLE from eval dict, treating NaN/invalid as inf."""
+    v = e.get("rmsle")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return float("inf")
+    if v != v:  # NaN
+        return float("inf")
+    return v
+
+
 def _preference(a_eval: Dict[str, Any], b_eval: Dict[str, Any]) -> str:
     """Return 'a', 'b', or 'tie' where a is the preferred one.
 
-    Primary: higher exact_accuracy. Tiebreak: lower RMSLE (NaN is worst).
+    Primary: lower RMSLE (NaN is worst).  Tiebreak: higher exact_accuracy.
     """
-    a_acc = float(a_eval.get("exact_accuracy") or 0.0)
-    b_acc = float(b_eval.get("exact_accuracy") or 0.0)
-    if a_acc != b_acc:
-        return "a" if a_acc > b_acc else "b"
-
-    def _rmsle(e: Dict[str, Any]) -> float:
-        v = e.get("rmsle")
-        try:
-            v = float(v)
-        except (TypeError, ValueError):
-            return float("inf")
-        if v != v:  # NaN
-            return float("inf")
-        return v
-
     a_r = _rmsle(a_eval)
     b_r = _rmsle(b_eval)
+
     if a_r == b_r:
+        # Identical RMSLE — fall back to symbolic-equivalence tiebreak
+        a_acc = float(a_eval.get("exact_accuracy") or 0.0)
+        b_acc = float(b_eval.get("exact_accuracy") or 0.0)
+        if a_acc != b_acc:
+            return "a" if a_acc > b_acc else "b"
         return "tie"
+
     return "a" if a_r < b_r else "b"
 
 
