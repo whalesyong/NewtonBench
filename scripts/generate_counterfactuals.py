@@ -842,6 +842,9 @@ def materialize_one_root(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     num_suffix_rollouts = int(task["num_suffix_rollouts"])
     verbose = bool(task.get("verbose", False))
 
+    # purpose: temp sample a different action, a_t, get s_{t+1} <- P(s_t, a_t), then 
+    # fan out independent rollouts from s_{t+1}
+
     trial = load_trial(trial_path)
     if trial is None:
         _log(verbose, f"[PAIR {pair_index}] Skipping unreadable trial: {trial_path}")
@@ -905,6 +908,7 @@ def materialize_one_root(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
 
     try:
+        # take the counterfactual action
         first_step = _step_from_state(
             agent_backend=agent_backend,
             module=module,
@@ -925,7 +929,7 @@ def materialize_one_root(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         print(f"[WARN] counterfactual first step failed for {trial_path}: {exc}")
         traceback.print_exc()
         return None
-
+    
     cf_group_id = f"{trial_info_base['trial_id']}_d{decision_index}"
     common_record = {
         "pair_index": pair_index,
