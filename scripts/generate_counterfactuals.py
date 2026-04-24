@@ -1095,13 +1095,18 @@ def complete_one_continuation(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
 
 
-def _run_task_map(func, tasks: List[Dict[str, Any]], workers: int) -> List[Any]:
+def _run_task_map(func, tasks: List[Dict[str, Any]], workers: int, desc: str = "tasks") -> List[Any]:
     if not tasks:
         return []
+    total = len(tasks)
+    print(f"[{desc}] starting {total} tasks ...")
     if workers > 1:
         with Pool(processes=workers) as pool:
-            return list(pool.imap_unordered(func, tasks))
-    return [func(task) for task in tasks]
+            results = list(pool.imap_unordered(func, tasks))
+    else:
+        results = [func(task) for task in tasks]
+    print(f"[{desc}] done: {len(results)}/{total}")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1231,20 +1236,33 @@ def main() -> int:
             }
         )
 
-    stage_one_results = _run_task_map(materialize_one_root, root_tasks, args.workers)
+    stage_one_results = _run_task_map(materialize_one_root, root_tasks, args.workers, desc="roots")
 
     all_records: List[Dict[str, Any]] = []
     continuation_tasks: List[Dict[str, Any]] = []
     for result in stage_one_results:
         if not result:
             continue
-        all_records.extend(result.get("records", []))
-        continuation_tasks.extend(result.get("continuation_tasks", []))
+        recs = result.get("records", [])
+        conts = result.get("continuation_tasks", [])
+        all_records.extend(recs)
+        continuation_tasks.extend(conts)
+        if recs:
+            r = recs[0]
+            rmsle = r["counterfactual"]["evaluation"].get("rmsle", float("nan"))
+            print(f"[PAIR {r['pair_index']}] terminal → preference={r['preference']} rmsle={rmsle:.4f}")
+        elif conts:
+            print(f"[PAIR {conts[0]['common_record']['pair_index']}] spawned {len(conts)} continuation(s)")
 
-    stage_two_records = _run_task_map(complete_one_continuation, continuation_tasks, args.workers)
+    stage_two_records = _run_task_map(complete_one_continuation, continuation_tasks, args.workers, desc="continuations")
     for rec in stage_two_records:
         if rec is not None:
             all_records.append(rec)
+            rmsle = rec["counterfactual"]["evaluation"].get("rmsle", float("nan"))
+            print(
+                f"[PAIR {rec['pair_index']}][ROLLOUT {rec['rollout_index']}] preference={rec['preference']} "
+                f"rmsle={rmsle:.4f} (trial {rec['trial_id']}, decision_index={rec['decision_index']}, fanout={rec.get('fanout_size', '?')})"
+            )
 
     fanout_counts = Counter(rec["cf_group_id"] for rec in all_records)
     for rec in all_records:
@@ -1258,10 +1276,6 @@ def main() -> int:
         for rec in all_records:
             fout.write(json.dumps(rec) + "\n")
             written += 1
-            print(
-                f"[PAIR {rec['pair_index']}][ROLLOUT {rec['rollout_index']}] preference={rec['preference']} "
-                f"(trial {rec['trial_id']}, decision_index={rec['decision_index']}, fanout={rec['fanout_size']})"
-            )
 
     print(f"[DONE] Wrote {written} preference records to {args.out}.")
     return 0
