@@ -2,6 +2,7 @@ import re
 import ast
 import json
 import traceback
+import threading
 import multiprocessing as _mp
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
@@ -20,6 +21,19 @@ def _exec_worker(code: str, result_queue) -> None:
         result_queue.put(('ok', buf.getvalue().strip()))
     except Exception as exc:
         result_queue.put(('err', str(exc), traceback.format_exc()))
+
+
+def _exec_inline(code: str) -> Tuple[str, Any]:
+    """Run exec(code) inline, capturing stdout. Returns (status, payload)."""
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            exec(code, {})
+        return ('ok', buf.getvalue().strip())
+    except Exception as exc:
+        return ('err', str(exc), traceback.format_exc())
 
 
 class CodeExecutorBase:
@@ -132,7 +146,19 @@ class CodeExecutorBase:
         Execute Python code in a child process with a hard wall-clock timeout.
         Prevents runaway LLM-generated code (infinite loops, diverging computations)
         from blocking the parent worker indefinitely.
+
+        Falls back to thread-based execution when running inside a daemonic
+        process (e.g. a multiprocessing.Pool worker), since daemonic processes
+        cannot spawn children.
         """
+        try:
+            return self._execute_in_subprocess(code, timeout)
+        except AssertionError as e:
+            if 'daemonic' in str(e):
+                return self._execute_in_thread(code, timeout)
+            raise
+
+    def _execute_in_subprocess(self, code: str, timeout: int) -> Dict[str, Any]:
         ctx = _mp.get_context('fork')
         result_queue = ctx.Queue()
         proc = ctx.Process(target=_exec_worker, args=(code, result_queue))
@@ -164,6 +190,47 @@ class CodeExecutorBase:
                 'stdout': payload[0],
                 'code': code,
                 'message': 'Code executed successfully',
+            }
+        return {
+            'success': False,
+            'error_type': 'execution_error',
+            'error_message': payload[0],
+            'traceback': payload[1] if len(payload) > 1 else '',
+        }
+
+    @staticmethod
+    def _execute_in_thread(code: str, timeout: int) -> Dict[str, Any]:
+        result_container = []
+
+        def _worker():
+            result_container.append(_exec_inline(code))
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            return {
+                'success': False,
+                'error_type': 'timeout',
+                'error_message': f'Code execution exceeded {timeout}s limit (thread fallback). Possible infinite loop or diverging computation.',
+            }
+
+        if not result_container:
+            return {
+                'success': False,
+                'error_type': 'execution_error',
+                'error_message': 'Thread produced no result.',
+                'traceback': '',
+            }
+
+        status, *payload = result_container[0]
+        if status == 'ok':
+            return {
+                'success': True,
+                'stdout': payload[0],
+                'code': code,
+                'message': 'Code executed successfully (thread fallback)',
             }
         return {
             'success': False,
