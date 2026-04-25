@@ -182,9 +182,9 @@ def safe_json_parse(response_text):
     return response_text, f"JSON parsing failed: {error}"
 
 
-API_TIMEOUT = 300
-API_MAX_RETRIES = 3
-API_RETRY_BACKOFF = 10
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "60"))
+API_MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", "5"))
+API_RETRY_BACKOFF = int(os.getenv("API_RETRY_BACKOFF", "5"))
 
 _TIMEOUT_EXCEPTION_NAMES = frozenset([
     "APITimeoutError", "Timeout", "ReadTimeout", "ConnectTimeout",
