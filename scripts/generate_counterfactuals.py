@@ -27,7 +27,7 @@ from collections import Counter
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Make sure we can import project modules when invoked from project root.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1095,16 +1095,64 @@ def complete_one_continuation(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
 
 
-def _run_task_map(func, tasks: List[Dict[str, Any]], workers: int, desc: str = "tasks") -> List[Any]:
+def _load_resume_records(stream_path: Path, num_suffix_rollouts: int
+                         ) -> Tuple[List[Dict[str, Any]], Set[int]]:
+    """Read a prior run's partial JSONL and return ``(kept_records, complete_pair_indices)``.
+
+    A pair is "complete" if it has a terminal record (``fanout_size == 1``) or
+    its full set of ``num_suffix_rollouts`` continuation records. Records for
+    partially-completed pairs are dropped, since we cannot deterministically
+    resume mid-rollout (counterfactual action sampling is non-deterministic).
+    Those pairs will be re-run from scratch."""
+    if not stream_path.exists():
+        return [], set()
+
+    by_pair: Dict[int, List[Dict[str, Any]]] = {}
+    with stream_path.open(encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                # Tolerate a truncated final line from a hard kill.
+                continue
+            by_pair.setdefault(rec["pair_index"], []).append(rec)
+
+    kept: List[Dict[str, Any]] = []
+    complete: Set[int] = set()
+    for pid, recs in by_pair.items():
+        is_terminal = any(r.get("fanout_size") == 1 for r in recs)
+        if is_terminal or len(recs) >= num_suffix_rollouts:
+            complete.add(pid)
+            kept.extend(recs)
+    return kept, complete
+
+
+def _run_task_map(func, tasks: List[Dict[str, Any]], workers: int, desc: str = "tasks",
+                  on_result=None) -> List[Any]:
+    """Run ``func`` over ``tasks`` in parallel, optionally invoking ``on_result``
+    in the main process for each completed result. ``on_result`` lets callers
+    stream incremental output (e.g. write results to disk as they arrive) without
+    waiting for the full pool to drain."""
     if not tasks:
         return []
     total = len(tasks)
     print(f"[{desc}] starting {total} tasks ...")
+    results: List[Any] = []
     if workers > 1:
         with Pool(processes=workers) as pool:
-            results = list(pool.imap_unordered(func, tasks))
+            for result in pool.imap_unordered(func, tasks):
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
     else:
-        results = [func(task) for task in tasks]
+        for task in tasks:
+            result = func(task)
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
     print(f"[{desc}] done: {len(results)}/{total}")
     return results
 
@@ -1138,6 +1186,9 @@ def main() -> int:
                         help="Sample branch roots with replacement (default: without, capped at num available).")
     parser.add_argument("--min-branch-turn", type=int, default=1,
                         help="Minimum outer-turn index eligible for branching (default: 1, so the first assistant action is never re-sampled).")
+    parser.add_argument("--resume", action="store_true",
+                        help="If <out>.partial exists, skip pairs that already have a complete record set "
+                             "(terminal record, or all num-suffix-rollouts continuations).")
     args = parser.parse_args()
 
     if args.num_traj <= 0:
@@ -1236,47 +1287,88 @@ def main() -> int:
             }
         )
 
-    stage_one_results = _run_task_map(materialize_one_root, root_tasks, args.workers, desc="roots")
+    # Stream records to a partial file as they complete so progress survives
+    # crashes / SIGKILL. After both stages finish, we rewrite the canonical
+    # output file with computed fanout_size and sorted order.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    stream_path = args.out.with_suffix(args.out.suffix + ".partial")
 
     all_records: List[Dict[str, Any]] = []
-    continuation_tasks: List[Dict[str, Any]] = []
-    for result in stage_one_results:
-        if not result:
-            continue
-        recs = result.get("records", [])
-        conts = result.get("continuation_tasks", [])
-        all_records.extend(recs)
-        continuation_tasks.extend(conts)
-        if recs:
-            r = recs[0]
-            rmsle = r["counterfactual"]["evaluation"].get("rmsle", float("nan"))
-            print(f"[PAIR {r['pair_index']}] terminal → preference={r['preference']} rmsle={rmsle:.4f}")
-        elif conts:
-            print(f"[PAIR {conts[0]['common_record']['pair_index']}] spawned {len(conts)} continuation(s)")
+    skip_pair_indices: Set[int] = set()
 
-    stage_two_records = _run_task_map(complete_one_continuation, continuation_tasks, args.workers, desc="continuations")
-    for rec in stage_two_records:
-        if rec is not None:
+    if args.resume:
+        all_records, skip_pair_indices = _load_resume_records(stream_path, args.num_suffix_rollouts)
+        if all_records:
+            print(f"[RESUME] Loaded {len(all_records)} records from {stream_path}; "
+                  f"{len(skip_pair_indices)} pairs complete and will be skipped.")
+        else:
+            print(f"[RESUME] No usable partial file at {stream_path}; running from scratch.")
+
+    if skip_pair_indices:
+        before = len(root_tasks)
+        root_tasks = [t for t in root_tasks if t["pair_index"] not in skip_pair_indices]
+        print(f"[RESUME] {len(root_tasks)}/{before} root tasks remain after skipping complete pairs.")
+
+    # Truncate the partial file to just the kept records (drops any
+    # incomplete-pair leftovers); subsequent writes append.
+    with stream_path.open("w", encoding="utf-8") as fout_init:
+        for rec in all_records:
+            fout_init.write(json.dumps(rec) + "\n")
+
+    print(f"[STREAM] Writing intermediate results to {stream_path}")
+
+    continuation_tasks: List[Dict[str, Any]] = []
+
+    with stream_path.open("a", encoding="utf-8") as fout_partial:
+        def stream_record(rec: Dict[str, Any]) -> None:
             all_records.append(rec)
+            fout_partial.write(json.dumps(rec) + "\n")
+            fout_partial.flush()
+
+        def on_root_result(result):
+            if not result:
+                return
+            recs = result.get("records", [])
+            conts = result.get("continuation_tasks", [])
+            for rec in recs:
+                stream_record(rec)
+            continuation_tasks.extend(conts)
+            if recs:
+                r = recs[0]
+                rmsle = r["counterfactual"]["evaluation"].get("rmsle", float("nan"))
+                print(f"[PAIR {r['pair_index']}] terminal → preference={r['preference']} rmsle={rmsle:.4f}")
+            elif conts:
+                print(f"[PAIR {conts[0]['common_record']['pair_index']}] spawned {len(conts)} continuation(s)")
+
+        def on_continuation_result(rec):
+            if rec is None:
+                return
+            stream_record(rec)
             rmsle = rec["counterfactual"]["evaluation"].get("rmsle", float("nan"))
             print(
                 f"[PAIR {rec['pair_index']}][ROLLOUT {rec['rollout_index']}] preference={rec['preference']} "
                 f"rmsle={rmsle:.4f} (trial {rec['trial_id']}, decision_index={rec['decision_index']}, fanout={rec.get('fanout_size', '?')})"
             )
 
+        _run_task_map(materialize_one_root, root_tasks, args.workers,
+                      desc="roots", on_result=on_root_result)
+        _run_task_map(complete_one_continuation, continuation_tasks, args.workers,
+                      desc="continuations", on_result=on_continuation_result)
+
+    # Final pass: compute fanout_size from successful rollouts per group, sort,
+    # and write the canonical output file.
     fanout_counts = Counter(rec["cf_group_id"] for rec in all_records)
     for rec in all_records:
         rec["fanout_size"] = fanout_counts[rec["cf_group_id"]]
-
     all_records.sort(key=lambda rec: (rec["pair_index"], rec.get("rollout_index", 0)))
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     with args.out.open("w", encoding="utf-8") as fout:
         for rec in all_records:
             fout.write(json.dumps(rec) + "\n")
             written += 1
 
+    stream_path.unlink(missing_ok=True)
     print(f"[DONE] Wrote {written} preference records to {args.out}.")
     return 0
 

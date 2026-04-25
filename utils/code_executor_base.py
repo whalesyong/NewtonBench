@@ -2,8 +2,24 @@ import re
 import ast
 import json
 import traceback
+import multiprocessing as _mp
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
+
+CODE_EXEC_TIMEOUT = 30  # seconds; kills runaway LLM-generated code
+
+
+def _exec_worker(code: str, result_queue) -> None:
+    """Run exec(code) in a child process, capturing stdout."""
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            exec(code, {})
+        result_queue.put(('ok', buf.getvalue().strip()))
+    except Exception as exc:
+        result_queue.put(('err', str(exc), traceback.format_exc()))
 
 
 class CodeExecutorBase:
@@ -111,47 +127,50 @@ class CodeExecutorBase:
         except Exception as e:
             return False, f"Validation error: {e}"
     
-    def execute_python_code(self, code: str) -> Dict[str, Any]:
+    def execute_python_code(self, code: str, timeout: int = CODE_EXEC_TIMEOUT) -> Dict[str, Any]:
         """
-        Execute Python code in a safe environment and capture output.
-        
-        Args:
-            code: Python code to execute
-            
-        Returns:
-            Dictionary containing execution results or error information
+        Execute Python code in a child process with a hard wall-clock timeout.
+        Prevents runaway LLM-generated code (infinite loops, diverging computations)
+        from blocking the parent worker indefinitely.
         """
-        try:
-            # Create a new namespace for execution
-            namespace = {}
-            
-            # Capture stdout by redirecting it
-            import io
-            from contextlib import redirect_stdout
-            
-            # Execute the code and capture output
-            output_buffer = io.StringIO()
-            with redirect_stdout(output_buffer):
-                exec(code, namespace)
-            
-            # Get the captured output
-            stdout_output = output_buffer.getvalue().strip()
-            
-            # Return success with output
+        ctx = _mp.get_context('fork')
+        result_queue = ctx.Queue()
+        proc = ctx.Process(target=_exec_worker, args=(code, result_queue))
+        proc.start()
+        proc.join(timeout)
+
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
             return {
-                'success': True,
-                'stdout': stdout_output,
-                'code': code,
-                'message': 'Code executed successfully'
+                'success': False,
+                'error_type': 'timeout',
+                'error_message': f'Code execution exceeded {timeout}s limit. Possible infinite loop or diverging computation.',
             }
-                
-        except Exception as e:
+
+        try:
+            status, *payload = result_queue.get_nowait()
+        except Exception:
             return {
                 'success': False,
                 'error_type': 'execution_error',
-                'error_message': str(e),
-                'traceback': traceback.format_exc()
+                'error_message': 'Child process produced no result.',
+                'traceback': '',
             }
+
+        if status == 'ok':
+            return {
+                'success': True,
+                'stdout': payload[0],
+                'code': code,
+                'message': 'Code executed successfully',
+            }
+        return {
+            'success': False,
+            'error_type': 'execution_error',
+            'error_message': payload[0],
+            'traceback': payload[1] if len(payload) > 1 else '',
+        }
     
     def process_llm_response(self, llm_response: str) -> Dict[str, Any]:
         """
