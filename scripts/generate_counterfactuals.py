@@ -58,6 +58,69 @@ from utils.vanilla_agent import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Branch-root filtering helpers
+# ---------------------------------------------------------------------------
+
+SCALAR_ONLY_MODULES = {
+    "m4_snell_law",
+    "m7_malus_law",
+    "m8_sound_speed",
+    "m9_hooke_law",
+    "m10_be_distribution",
+    "m11_heat_transfer",
+}
+
+
+def _is_scalar_module(module_name: str, model_system: str) -> bool:
+    """Return True if the module/system combination produces scalar outputs."""
+    if module_name in SCALAR_ONLY_MODULES:
+        return True
+    return model_system == "vanilla_equation"
+
+
+def _parse_experiment_params(response_text: str) -> Optional[List[Dict[str, Any]]]:
+    """Extract the JSON experiment specs from a <run_experiment> block.
+
+    Returns the list of input parameter dicts, or None if no valid block
+    is found.
+    """
+    if not response_text:
+        return None
+    start = response_text.find("<run_experiment>")
+    end = response_text.find("</run_experiment>")
+    if start < 0 or end < start:
+        return None
+    block = response_text[start + len("<run_experiment>"):end]
+    try:
+        parsed = json.loads(block.strip())
+    except json.JSONDecodeError:
+        # Try to find JSON inside non-JSON content (prose mentions)
+        for bracket in ("[", "{"):
+            b_start = block.find(bracket)
+            if b_start >= 0:
+                try:
+                    parsed = json.loads(block[b_start:])
+                    break
+                except json.JSONDecodeError:
+                    continue
+        else:
+            return None
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return [parsed]
+    return None
+
+
+def _experiments_identical(params_a: Optional[List[Dict[str, Any]]],
+                           params_b: Optional[List[Dict[str, Any]]]) -> bool:
+    """Return True if two experiment parameter lists are identical."""
+    if params_a is None or params_b is None:
+        return params_a is params_b
+    return json.dumps(params_a, sort_keys=True) == json.dumps(params_b, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
 # Trajectory discovery
 # ---------------------------------------------------------------------------
 def discover_trials(trial_dir: Path) -> List[Path]:
@@ -841,6 +904,8 @@ def materialize_one_root(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     judge_model_name = task["judge_model_name"]
     num_suffix_rollouts = int(task["num_suffix_rollouts"])
     verbose = bool(task.get("verbose", False))
+    action_filter = task.get("action_filter", "all")
+    rejection_max_attempts = int(task.get("rejection_max_attempts", 5))
 
     # purpose: temp sample a different action, a_t, get s_{t+1} <- P(s_t, a_t), then 
     # fan out independent rollouts from s_{t+1}
@@ -907,28 +972,108 @@ def materialize_one_root(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         verbose=verbose,
     )
 
-    try:
-        # take the counterfactual action
-        first_step = _step_from_state(
-            agent_backend=agent_backend,
-            module=module,
-            model_name=model_name,
-            state=point["state"],
-            noise_level=noise_level,
-            difficulty=difficulty,
-            system=system,
-            law_version=law_version,
-            max_turns=max_turns,
-            trial_info={
-                "trial_id": f"{trial_info_base['trial_id']}_first",
-                "trial_dir": trial_info_base["trial_dir"],
-            },
-            temperature=cf_temperature,
+    # Extract original experiment parameters for non-identical check
+    original_response_text = ""
+    original_action_type = point["original_action_type"]
+    if action_filter == "run_experiment_non_identical" and original_action_type == "run_experiment":
+        orig_msg_idx = point["assistant_message_index"]
+        if orig_msg_idx < len(chat_history):
+            original_response_text = chat_history[orig_msg_idx].get("content", "") or ""
+
+    original_exp_params = _parse_experiment_params(original_response_text) if original_response_text else None
+
+    # ---- Rejection-sampling loop for counterfactual first step ----
+    first_step = None
+    attempts = 0
+    while attempts < rejection_max_attempts:
+        attempts += 1
+        try:
+            first_step = _step_from_state(
+                agent_backend=agent_backend,
+                module=module,
+                model_name=model_name,
+                state=point["state"],
+                noise_level=noise_level,
+                difficulty=difficulty,
+                system=system,
+                law_version=law_version,
+                max_turns=max_turns,
+                trial_info={
+                    "trial_id": f"{trial_info_base['trial_id']}_first",
+                    "trial_dir": trial_info_base["trial_dir"],
+                },
+                temperature=cf_temperature,
+            )
+        except Exception as exc:
+            _log(verbose, f"[PAIR {pair_index}] attempt {attempts}/{rejection_max_attempts} failed: {exc}")
+            continue
+
+        cf_action_type = first_step["action_type"]
+        cf_response = first_step.get("response_text") or ""
+        cf_assistant = first_step.get("assistant_content") or ""
+
+        # Check acceptance criteria
+        if action_filter == "all":
+            break  # accept any action
+
+        if action_filter == "run_experiment":
+            if cf_action_type == "run_experiment":
+                break
+            _log(verbose,
+                 f"[PAIR {pair_index}] attempt {attempts}: action={cf_action_type}, re-sampling...")
+
+        elif action_filter == "run_experiment_non_identical":
+            if cf_action_type != "run_experiment":
+                _log(verbose,
+                     f"[PAIR {pair_index}] attempt {attempts}: action={cf_action_type}, re-sampling...")
+                continue
+            cf_exp_params = _parse_experiment_params(cf_response)
+            if cf_exp_params is None:
+                _log(verbose,
+                     f"[PAIR {pair_index}] attempt {attempts}: run_experiment but couldn't parse params")
+                continue
+            if _experiments_identical(original_exp_params, cf_exp_params):
+                _log(verbose,
+                     f"[PAIR {pair_index}] attempt {attempts}: identical experiment params, re-sampling...")
+                continue
+            break  # non-identical run_experiment
+
+    if first_step is None or (action_filter != "all" and attempts >= rejection_max_attempts):
+        reason = "first_step_failed" if first_step is None else (
+            f"exhausted {rejection_max_attempts} attempts with filter={action_filter}"
         )
-    except Exception as exc:
-        print(f"[WARN] counterfactual first step failed for {trial_path}: {exc}")
-        traceback.print_exc()
-        return None
+        _log(verbose, f"[PAIR {pair_index}] REJECTED: {reason}")
+        # Return a sentinel record so downstream tracking knows this pair was dropped
+        common_record = {
+            "pair_index": pair_index,
+            "trial_source": str(trial_path),
+            "trial_id": trial_id,
+            "module_name": module_name,
+            "model_name": model_name,
+            "agent_backend": agent_backend,
+            "equation_difficulty": difficulty,
+            "model_system": system,
+            "law_version": law_version,
+            "noise_level": noise_level,
+            "branch_turn": point["outer_turn"],
+            "branch_message_index": point["assistant_message_index"],
+            "decision_index": point["decision_index"],
+            "decision_phase": point["phase"],
+            "branch_python_calls_this_turn": point.get("python_calls_this_turn", 0),
+            "original_action_type": original_action_type,
+            "counterfactual_first_action_type": "",
+            "counterfactual_first_response": "",
+            "counterfactual_first_assistant_message": "",
+            "cf_temperature": cf_temperature,
+            "max_turns": max_turns,
+            "test_seed": test_seed,
+            "original": {
+                "submitted_law": original_law,
+                "evaluation": original_eval,
+                "chat_history": chat_history,
+            },
+        }
+        return {"records": [], "continuation_tasks": [], "_rejected": True, "_rejected_pair_index": pair_index, "_rejected_reason": reason}
     
     cf_group_id = f"{trial_info_base['trial_id']}_d{decision_index}"
     common_record = {
@@ -1189,6 +1334,18 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true",
                         help="If <out>.partial exists, skip pairs that already have a complete record set "
                              "(terminal record, or all num-suffix-rollouts continuations).")
+    parser.add_argument("--scalar-only", action="store_true",
+                        help="Only include trials from scalar-output modules "
+                             "(vanilla_equation system OR modules: m4,m7,m8,m9,m10,m11).")
+    parser.add_argument("--action-filter", type=str, default="all",
+                        choices=["all", "run_experiment", "run_experiment_non_identical"],
+                        help="Filter counterfactual actions: 'all' (any action), "
+                             "'run_experiment' (re-sample until <run_experiment>), "
+                             "'run_experiment_non_identical' (re-sample until non-identical "
+                             "<run_experiment> params) (default: all).")
+    parser.add_argument("--rejection-max-attempts", type=int, default=5,
+                        help="Maximum re-sampling attempts per branch root when using "
+                             "--action-filter=run_experiment[_non_identical] (default: 5).")
     args = parser.parse_args()
 
     if args.num_traj <= 0:
@@ -1218,6 +1375,13 @@ def main() -> int:
             continue
 
         agent_backend = trial.get("agent_backend", "vanilla_agent")
+        module_name = trial.get("module_name", "")
+        model_system = trial.get("model_system", "vanilla_equation")
+
+        # Scalar-only filter
+        if args.scalar_only and not _is_scalar_module(module_name, model_system):
+            continue
+
         discovered_by_backend[agent_backend] += 1
         effective_max_turns = int(trial.get("max_turns") or args.max_turns)
         points = extract_decision_points(trial.get("chat_history") or [], agent_backend, effective_max_turns)
@@ -1235,6 +1399,10 @@ def main() -> int:
                     "phase": point["phase"],
                     "original_action_type": point["original_action_type"],
                     "agent_backend": agent_backend,
+                    "module_name": module_name,
+                    "model_system": model_system,
+                    "equation_difficulty": trial.get("equation_difficulty", "easy"),
+                    "law_version": trial.get("law_version"),
                 }
             )
             branch_roots_by_backend[agent_backend] += 1
@@ -1273,6 +1441,7 @@ def main() -> int:
             )
 
     root_tasks: List[Dict[str, Any]] = []
+    rejection_stats = {"total_attempted": 0, "total_failed": 0}
     for i, root in enumerate(sampled_roots):
         root_tasks.append(
             {
@@ -1284,6 +1453,8 @@ def main() -> int:
                 "judge_model_name": args.judge_model_name,
                 "num_suffix_rollouts": args.num_suffix_rollouts,
                 "verbose": args.verbose,
+                "action_filter": args.action_filter,
+                "rejection_max_attempts": args.rejection_max_attempts,
             }
         )
 
@@ -1328,6 +1499,15 @@ def main() -> int:
         def on_root_result(result):
             if not result:
                 return
+            if result.get("_rejected"):
+                rejection_stats["total_attempted"] += 1
+                rejection_stats["total_failed"] += 1
+                reason = result.get("_rejected_reason", "unknown")
+                pid = result.get("_rejected_pair_index", "?")
+                print(f"[REJECTED] pair {pid}: {reason}")
+                return
+            if args.action_filter != "all":
+                rejection_stats["total_attempted"] += 1
             recs = result.get("records", [])
             conts = result.get("continuation_tasks", [])
             for rec in recs:
@@ -1354,6 +1534,13 @@ def main() -> int:
                       desc="roots", on_result=on_root_result)
         _run_task_map(complete_one_continuation, continuation_tasks, args.workers,
                       desc="continuations", on_result=on_continuation_result)
+
+    # Rejection summary
+    if args.action_filter != "all" and rejection_stats["total_attempted"] > 0:
+        rate = rejection_stats["total_failed"] / max(1, rejection_stats["total_attempted"]) * 100
+        print(f"[REJECTION] {rejection_stats['total_failed']}/{rejection_stats['total_attempted']} "
+              f"branch roots exhausted ({rate:.1f}%) "
+              f"with action_filter={args.action_filter}, max_attempts={args.rejection_max_attempts}")
 
     # Final pass: compute fanout_size from successful rollouts per group, sort,
     # and write the canonical output file.
