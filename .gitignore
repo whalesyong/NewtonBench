@@ -11,6 +11,9 @@ __pycache__/
 evaluation_results/
 *.csv
 
+# Ignore Claude Code guidance file (local only)
+CLAUDE.md
+
 # Ignore macOS generated files
 .DS_Store?
 ehthumbs.db
